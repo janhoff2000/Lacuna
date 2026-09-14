@@ -1,0 +1,45 @@
+{
+  "name": "lacuna",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "dev:web": "bun --conditions=development ./node_modules/.bin/react-router dev --host 127.0.0.1",
+    "web": "bun run dev:web",
+    "worker": "bun worker/index.ts",
+    "migrate": "bun scripts/migrate.ts",
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "lint": "eslint .",
+    "test": "bun test",
+    "build": "react-router build",
+    "start": "HOST=127.0.0.1 bun --bun ./node_modules/.bin/react-router-serve ./build/server/index.js",
+    "trial": "bun scripts/scraper-trial.ts"
+  },
+  "dependencies": {
+    "@react-router/node": "latest",
+    "@react-router/serve": "latest",
+    "app-store-scraper": "latest",
+    "cheerio": "^1.2.0",
+    "google-play-scraper": "latest",
+    "ipaddr.js": "^2.5.0",
+    "isbot": "latest",
+    "openai": "^7.15.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router": "latest",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@react-router/dev": "latest",
+    "@types/bun": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "eslint": "latest",
+    "globals": "latest",
+    "shadcn": "^4.21.0",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "latest",
+    "vite": "latest"
+  }
+}
