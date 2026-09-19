@@ -14,7 +14,7 @@ let directory: string; let path: string; let db: DB;
 const children: Bun.Subprocess[] = [];
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "lacuna-worker-")); path = join(directory, "db.sqlite"); db = openDatabase(path); });
 afterEach(async () => { for (const child of children.splice(0)) { if (child.exitCode === null) child.kill("SIGKILL"); await child.exited; } db.close(); rmSync(directory, { recursive: true, force: true }); });
-const settings = { preset: "quick" as const, countries: ["US"], appLimit: 1, reviewLimit: 1, reviewCandidates: false };
+const settings = { preset: "quick" as const, countries: ["US"], spokenLanguages: ["en"], appLimit: 1, reviewLimit: 1, reviewCandidates: false };
 async function until(predicate: () => boolean, timeout = 5000) { const deadline = Date.now() + timeout; while (!predicate()) { if (Date.now() > deadline) throw new Error("Timed out waiting for child state"); await Bun.sleep(10); } }
 function child(mode: string) {
   const proc = Bun.spawn([process.execPath, "tests/fixtures/worker-child.ts", mode, path], { stdout: "pipe", stderr: "pipe" }); children.push(proc);

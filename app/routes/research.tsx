@@ -49,10 +49,12 @@ export function loader({ params }: LoaderFunctionArgs) {
   const db = openDatabase();
   try {
     if (!params.runId) throw new Response("Not found", { status: 404 });
+    const settings = readSettings(db);
     return {
       view: readResearch(db, params.runId),
       progress: researchProgress(db, params.runId),
-      configured: readSettings(db).configured,
+      configured: settings.configured,
+      spokenLanguages: settings.spokenLanguages,
     };
   } catch (error) {
     if (error instanceof Error && error.message === "Unknown run")
@@ -307,6 +309,8 @@ export default function ResearchRun() {
           selectedId={params.get("opportunity")}
           selectedSource={params.get("source")}
           complete={progress.status === "completed"}
+          savedOpportunityIds={loaded.view.savedOpportunityIds}
+          spokenLanguages={loaded.spokenLanguages}
         />
       ) : (
         !review && (

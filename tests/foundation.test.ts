@@ -10,7 +10,7 @@ import { collectionRequestCount, parseCollectionCheckpoint, replaceCollectionTas
 import { saveSource, type SourceSnapshot } from "../server/sources";
 import { decodeObject, encodeJson, parseRunSettings, type RunSettings } from "../shared/types";
 
-const settings: RunSettings = { preset: "quick", countries: ["US"], appLimit: 10, reviewLimit: 2000, reviewCandidates: false };
+const settings: RunSettings = { preset: "quick", countries: ["US"], spokenLanguages: ["en"], appLimit: 10, reviewLimit: 2000, reviewCandidates: false };
 let directory: string; let db: DB; let path: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "lacuna-foundation-")); path = join(directory, "test.sqlite"); db = openDatabase(path); });
 afterEach(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -22,9 +22,9 @@ describe("database and JSON", () => {
     expect(db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     expect(db.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(db.query("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
-    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
     expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name)).toEqual(["ai_requests", "analyses", "opportunities", "run_sources", "runs", "saved_opportunities", "settings", "sources", "tasks"]);
-    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 4 }); second.close();
+    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 5 }); second.close();
     expect(() => createTask(db, "missing", "collection", "key")).toThrow();
   });
   test("transaction rollback, async refusal and runtime JSON validation", () => {

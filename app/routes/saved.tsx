@@ -16,10 +16,16 @@ import {
   EmptyState,
   FieldError,
   PageHeader,
+  SelectMenu,
   Submit,
   WorkspaceError,
   fieldA11y,
 } from "../components/workspace";
+
+const statusOptions = Object.entries(STATUS_LABELS).map(([value, label]) => ({
+  value,
+  label,
+}));
 
 export const meta: MetaFunction = () => [
   { title: "Saved opportunities · Lacuna" },
@@ -49,27 +55,15 @@ export default function Saved() {
       <div className="page-body">
         <ActionFeedback result={result} />
         <div className="saved-toolbar">
-          <label htmlFor="status-filter">
-            Filter by status
-            <select
-              id="status-filter"
-              value={filter}
-              onChange={(event) =>
-                setParams(
-                  event.target.value === "all"
-                    ? {}
-                    : { status: event.target.value },
-                )
-              }
-            >
-              <option value="all">All statuses</option>
-              {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <SelectMenu
+            id="status-filter"
+            label="Filter by status"
+            value={filter}
+            options={[{ value: "all", label: "All statuses" }, ...statusOptions]}
+            onValueChange={(value) =>
+              setParams(value === "all" ? {} : { status: value })
+            }
+          />
           <span className="metadata">
             {rows.length} {rows.length === 1 ? "opportunity" : "opportunities"}
           </span>
@@ -97,25 +91,18 @@ export default function Saved() {
                 <Form method="post">
                   <input type="hidden" name="intent" value="update_saved" />
                   <input type="hidden" name="id" value={row.id} />
-                  <label htmlFor={`status-${row.id}`}>
-                    Your status
-                    <select
-                      id={`status-${row.id}`}
-                      name="status"
-                      defaultValue={
-                        typeof ownResult?.values?.status === "string"
-                          ? ownResult.values.status
-                          : row.status
-                      }
-                      {...fieldA11y("status", ownResult)}
-                    >
-                      {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <SelectMenu
+                    id={`status-${row.id}`}
+                    name="status"
+                    label="Your status"
+                    defaultValue={
+                      typeof ownResult?.values?.status === "string"
+                        ? ownResult.values.status
+                        : row.status
+                    }
+                    options={statusOptions}
+                    {...fieldA11y("status", ownResult)}
+                  />
                   <FieldError name="status" result={ownResult} />
                   <label htmlFor={`notes-${row.id}`}>
                     Investigation notes

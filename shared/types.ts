@@ -5,8 +5,29 @@ export type RunReason = "app_review" | "user" | "budget" | "interrupted" | "erro
 export const STAGES = ["discovery", "candidate_review", "collection", "analysis", "grouping", "verification", "report"] as const;
 export type Stage = (typeof STAGES)[number];
 export type Store = "apple" | "google";
+export const LANGUAGE_TAG = /^[a-z]{2,3}(?:-[A-Z]{2})?$/;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
+
+export function normalizeLanguageTag(value: string): string {
+  const [language = "", region] = value.trim().split("-");
+  return region
+    ? `${language.toLowerCase()}-${region.toUpperCase()}`
+    : language.toLowerCase();
+}
+
+export function languageMatchesAny(
+  language: string,
+  accepted: readonly string[],
+): boolean {
+  const candidate = normalizeLanguageTag(language).toLowerCase();
+  if (!candidate) return false;
+  const base = candidate.split("-")[0];
+  return accepted.some((value) => {
+    const normalized = normalizeLanguageTag(value).toLowerCase();
+    return normalized === candidate || normalized.split("-")[0] === base;
+  });
+}
 
 export function validateJson(value: unknown, depth = 0): asserts value is Json {
   if (depth > 30) throw new Error("JSON exceeds maximum nesting");
@@ -44,6 +65,7 @@ export function decodeObject(encoded: string): JsonObject {
 export interface RunSettings {
   preset: "quick" | "deep";
   countries: string[];
+  spokenLanguages: string[];
   appLimit: number;
   reviewLimit: number;
   reviewCandidates: boolean;
@@ -55,6 +77,7 @@ export function parseRunSettings(value: unknown): RunSettings {
   if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("Expected run settings");
   if (value.preset !== "quick" && value.preset !== "deep") throw new Error("Invalid preset");
   if (!Array.isArray(value.countries) || !value.countries.length || !value.countries.every(c => typeof c === "string" && /^[A-Z]{2}$/.test(c))) throw new Error("Explicit country codes required");
+  if (!Array.isArray(value.spokenLanguages) || !value.spokenLanguages.length || !value.spokenLanguages.every(language => typeof language === "string" && LANGUAGE_TAG.test(language))) throw new Error("Explicit spoken language codes required");
   for (const key of ["appLimit", "reviewLimit"] as const) {
     if (typeof value[key] !== "number" || !Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`Invalid ${key}`);
   }

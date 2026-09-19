@@ -1,4 +1,4 @@
-import { useEffect, useState, useId, type ReactNode } from "react";
+import { useEffect, useRef, useState, useId, type KeyboardEvent, type ReactNode } from "react";
 import {
   Form,
   Link,
@@ -31,7 +31,11 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="brand-row">
           <Link className="brand" to="/" aria-label="Lacuna research home">
             <span className="brand-symbol" aria-hidden="true">
-              l
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M5 5v14h14" />
+                <path d="M9 5v10h10" />
+                <path d="M13 5v6h6" />
+              </svg>
             </span>
             Lacuna
           </Link>
@@ -39,9 +43,10 @@ export function Shell({ children }: { children: ReactNode }) {
             className="mobile-menu"
             aria-expanded={open}
             aria-controls="main-navigation"
+            aria-label="Toggle navigation"
             onClick={() => setOpen(!open)}
           >
-            Menu
+            <span aria-hidden="true">{open ? "Close" : "Menu"}</span>
           </button>
         </div>
         <nav
@@ -83,6 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
   );
 }
 function NavGlyph({ kind }: { kind: string }) {
+  if (kind === "saved") return <BookmarkIcon />;
   return (
     <svg
       width="18"
@@ -98,8 +104,6 @@ function NavGlyph({ kind }: { kind: string }) {
           <rect x="4" y="4" width="16" height="16" rx="2" />
           <path d="M8 9h8M8 13h8M8 17h4" />
         </>
-      ) : kind === "saved" ? (
-        <path d="M6 4h12v17l-6-4-6 4V4Z" />
       ) : (
         <>
           <path d="M4 7h16M4 17h16" />
@@ -107,6 +111,23 @@ function NavGlyph({ kind }: { kind: string }) {
           <circle cx="15" cy="17" r="3" fill="var(--surface)" />
         </>
       )}
+    </svg>
+  );
+}
+export function BookmarkIcon({ filled = false }: { filled?: boolean }) {
+  return (
+    <svg
+      className={`bookmark-icon ${filled ? "filled" : ""}`}
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6 4h12v17l-6-4-6 4V4Z" />
     </svg>
   );
 }
@@ -236,6 +257,222 @@ export function fieldA11y(
     "aria-invalid": errorId ? (true as const) : undefined,
     "aria-describedby": [describedBy, errorId].filter(Boolean).join(" ") || undefined,
   };
+}
+export type SelectOption = { value: string; label: string };
+export function SelectMenu({
+  id,
+  label,
+  name,
+  options,
+  value,
+  defaultValue,
+  onValueChange,
+  className,
+  "aria-invalid": ariaInvalid,
+  "aria-describedby": ariaDescribedBy,
+}: {
+  id: string;
+  label: string;
+  name?: string;
+  options: SelectOption[];
+  value?: string;
+  defaultValue?: string;
+  onValueChange?: (value: string) => void;
+  className?: string;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [uncontrolledValue, setUncontrolledValue] = useState(
+    defaultValue ?? options[0]?.value ?? "",
+  );
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const valueInput = useRef<HTMLInputElement>(null);
+  const optionButtons = useRef<Array<HTMLButtonElement | null>>([]);
+  const controlled = value !== undefined;
+  const selectedValue = controlled ? value : uncontrolledValue;
+  const selectedIndex = Math.max(
+    options.findIndex((option) => option.value === selectedValue),
+    0,
+  );
+  const selected = options[selectedIndex];
+  const listboxId = `${id}-options`;
+  useEffect(() => {
+    if (!controlled && defaultValue !== undefined) setUncontrolledValue(defaultValue);
+  }, [controlled, defaultValue]);
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePress);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+  const choose = (nextValue: string) => {
+    if (!controlled) setUncontrolledValue(nextValue);
+    onValueChange?.(nextValue);
+    setOpen(false);
+    trigger.current?.focus();
+    requestAnimationFrame(() =>
+      valueInput.current?.dispatchEvent(new Event("change", { bubbles: true })),
+    );
+  };
+  const focusOption = (index: number) => {
+    setOpen(true);
+    requestAnimationFrame(() => optionButtons.current[index]?.focus());
+  };
+  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOption(Math.min(selectedIndex + 1, options.length - 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(Math.max(selectedIndex - 1, 0));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusOption(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusOption(options.length - 1);
+    }
+  };
+  const handleOptionKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      optionButtons.current[Math.min(index + 1, options.length - 1)]?.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      optionButtons.current[Math.max(index - 1, 0)]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      optionButtons.current[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      optionButtons.current[options.length - 1]?.focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      trigger.current?.focus();
+    }
+  };
+  return (
+    <div className={`select-menu ${className ?? ""}`.trim()} ref={root}>
+      <label className="select-menu-label" htmlFor={id}>
+        {label}
+      </label>
+      {name && <input ref={valueInput} type="hidden" name={name} value={selectedValue} />}
+      <button
+        ref={trigger}
+        id={id}
+        type="button"
+        className="select-menu-trigger"
+        aria-label={`${label}: ${selected?.label ?? ""}`}
+        aria-haspopup="listbox"
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-invalid={ariaInvalid}
+        aria-describedby={ariaDescribedBy}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={handleTriggerKeyDown}
+      >
+        <span>{selected?.label}</span>
+      </button>
+      {open && (
+        <div className="select-menu-options" id={listboxId} role="listbox">
+          {options.map((option, index) => (
+            <button
+              key={option.value}
+              ref={(element) => {
+                optionButtons.current[index] = element;
+              }}
+              type="button"
+              role="option"
+              aria-selected={option.value === selectedValue}
+              className={option.value === selectedValue ? "selected" : undefined}
+              onClick={() => choose(option.value)}
+              onKeyDown={(event) => handleOptionKeyDown(event, index)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+export function ChipPicker({
+  id,
+  label,
+  name,
+  options,
+  selected,
+  onChange,
+  description,
+  "aria-invalid": ariaInvalid,
+  "aria-describedby": ariaDescribedBy,
+}: {
+  id: string;
+  label: string;
+  name: string;
+  options: SelectOption[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+  description?: ReactNode;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const toggle = (value: string) => {
+    const next = selected.includes(value)
+      ? selected.filter((item) => item !== value)
+      : [...selected, value];
+    onChange(next);
+    requestAnimationFrame(() =>
+      input.current?.dispatchEvent(new Event("change", { bubbles: true })),
+    );
+  };
+  return (
+    <fieldset
+      className="chip-picker"
+      aria-invalid={ariaInvalid}
+      aria-describedby={ariaDescribedBy}
+    >
+      <legend>{label}</legend>
+      <input ref={input} id={id} type="hidden" name={name} value={selected.join(", ")} />
+      <div className="chip-picker-options">
+        {options.map((option) => {
+          const active = selected.includes(option.value);
+          return (
+            <button
+              key={option.value}
+              type="button"
+              className={active ? "selected" : undefined}
+              role="checkbox"
+              aria-checked={active}
+              onClick={() => toggle(option.value)}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+      {description && <p className="field-hint">{description}</p>}
+    </fieldset>
+  );
 }
 export function Submit({
   children,

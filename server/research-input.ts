@@ -2,7 +2,7 @@ import { z } from "zod";
 import { DEFAULT_MODEL } from "./ai";
 import { parseStoreUrl } from "./collectors/common";
 import { PRESETS } from "./policy";
-import { parseRunSettings, type RunSettings } from "../shared/types";
+import { normalizeLanguageTag, parseRunSettings, type RunSettings } from "../shared/types";
 
 export const researchInputSchema = z.object({
   mode: z.enum(["topic", "category"]), query: z.string().trim().max(2000).default(""),
@@ -20,13 +20,14 @@ export function researchSettings(value: unknown): RunSettings {
   if (settings.appLimit > 100 || settings.reviewLimit > 20_000 || settings.countries.length > 30) throw new Error("Scope exceeds local safety limits");
   if (settings.stores !== undefined && (!Array.isArray(settings.stores) || !settings.stores.length || !settings.stores.every(s => s === "apple" || s === "google"))) throw new Error("Invalid stores");
   if (settings.languages !== undefined && (!Array.isArray(settings.languages) || !settings.languages.every(l => typeof l === "string" && /^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(l)) || settings.languages.length > 20)) throw new Error("Invalid review languages");
+  if (settings.spokenLanguages.length > 20) throw new Error("Invalid spoken languages");
   if (settings.model !== undefined && (typeof settings.model !== "string" || !settings.model.trim() || settings.model.length > 100)) throw new Error("Invalid model");
   if (settings.crossPlatform !== undefined && typeof settings.crossPlatform !== "boolean") throw new Error("Invalid cross-platform choice");
   if (settings.direction !== undefined && !["android_to_ios", "ios_to_android", "both"].includes(String(settings.direction))) throw new Error("Invalid platform direction");
-  return { ...settings, countries: [...new Set(settings.countries)], stores: settings.stores ?? ["apple", "google"], languages: settings.languages ?? [], model: settings.model ?? DEFAULT_MODEL, crossPlatform: settings.crossPlatform ?? true, direction: settings.direction ?? "android_to_ios" };
+  return { ...settings, countries: [...new Set(settings.countries)], stores: settings.stores ?? ["apple", "google"], languages: settings.languages ?? [], spokenLanguages: [...new Set(settings.spokenLanguages.map(normalizeLanguageTag))], model: settings.model ?? DEFAULT_MODEL, crossPlatform: settings.crossPlatform ?? true, direction: settings.direction ?? "android_to_ios" };
 }
 export function defaultResearchSettings(): RunSettings {
-  return researchSettings({ preset: "quick", countries: ["US", "GB", "DE", "FR", "NL", "ES"], appLimit: PRESETS.quick.apps, reviewLimit: PRESETS.quick.reviews, reviewCandidates: false });
+  return researchSettings({ preset: "quick", countries: ["US", "GB", "DE", "FR", "NL", "ES"], spokenLanguages: ["en"], appLimit: PRESETS.quick.apps, reviewLimit: PRESETS.quick.reviews, reviewCandidates: false });
 }
 export function searchIntents(input: ResearchInput, preset: "quick" | "deep"): string[] {
   const terms = input.mode === "category" ? input.categories.map(category => [category.label, input.query].filter(Boolean).join(" ")) : [input.query, ...input.query.split(/[;\n]/)];

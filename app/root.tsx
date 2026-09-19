@@ -31,7 +31,7 @@ export function loader() {
 
 export function Layout({ children }: { children: ReactNode }) {
   const settings = useRouteLoaderData<typeof loader>("root");
-  const appearance = settings?.appearance ?? "system";
+  const appearance = settings?.appearance ?? "dark";
   return (
     <html
       lang="en"
@@ -41,6 +41,7 @@ export function Layout({ children }: { children: ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         <script dangerouslySetInnerHTML={{ __html: themeScript(appearance) }} />
         <Meta />
         <Links />

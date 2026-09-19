@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Form, Link } from "react-router";
-import type { JsonObject } from "../../shared/types";
+import { languageMatchesAny, type JsonObject } from "../../shared/types";
 import type { readResearch } from "../../server/operations";
 import {
   date,
@@ -16,7 +16,7 @@ import {
   str,
   strings,
 } from "../lib/workspace";
-import { EmptyState, Notice, Submit } from "./workspace";
+import { BookmarkIcon, EmptyState, Notice, Submit } from "./workspace";
 
 export type ResearchView = ReturnType<typeof readResearch>;
 export type SourceView = ResearchView["sources"][number];
@@ -37,6 +37,36 @@ function sourceLocale(source: SourceView) {
     detectedLanguage: str(source.payload.detectedLanguage, "Unknown"),
   };
 }
+function languageLabel(language: string): string {
+  try {
+    return (
+      new Intl.DisplayNames(["en"], { type: "language" }).of(language) ??
+      language.toUpperCase()
+    );
+  } catch {
+    return language.toUpperCase();
+  }
+}
+function RatingStars({ rating }: { rating: number }) {
+  const filled = Math.max(0, Math.min(5, Math.round(rating)));
+  return (
+    <span
+      className="review-rating"
+      aria-label={`${rating} out of 5 stars`}
+      title={`${rating} out of 5 stars`}
+    >
+      {Array.from({ length: 5 }, (_, index) => (
+        <span
+          key={index}
+          className={index < filled ? "star-filled" : "star-empty"}
+          aria-hidden="true"
+        >
+          {index < filled ? "★" : "☆"}
+        </span>
+      ))}
+    </span>
+  );
+}
 export function SourceLink({
   source,
   children,
@@ -45,18 +75,57 @@ export function SourceLink({
   children?: React.ReactNode;
 }) {
   const url = safeUrl(source?.url);
+  const label =
+    source?.payload.directReviewUrl === true
+      ? "Open review"
+      : source?.kind === "review"
+        ? "Open app listing"
+        : "Open source";
   return url ? (
-    <a href={url} target="_blank" rel="noreferrer">
-      {children ??
-        (source?.payload.directReviewUrl === true
-          ? "Open captured review"
-          : source?.kind === "review"
-            ? "Open app listing"
-            : "Open captured source")}
+    <a className="external-link" href={url} target="_blank" rel="noreferrer">
+      {children ?? label}
+      <span className="external-link-icon" aria-hidden="true">
+        ↗
+      </span>
       <span className="sr-only"> (opens in a new tab)</span>
     </a>
   ) : (
     <span className="muted">No source URL captured</span>
+  );
+}
+function PrioritySignal({ priority }: { priority: number }) {
+  const level = { 1: "High", 2: "Medium", 3: "Low" }[priority];
+  const activeBars = { 1: 3, 2: 2, 3: 1 }[priority] ?? 0;
+  const label = level ?? "Unassessed";
+  return (
+    <span
+      className={`priority-signal priority-${label.toLowerCase()}`}
+      aria-label={`${label} priority`}
+    >
+      <span className="priority-bars" aria-hidden="true">
+        {Array.from({ length: 3 }, (_, index) => (
+          <i key={index} className={index < activeBars ? "active" : ""} />
+        ))}
+      </span>
+      <span>{label} priority</span>
+    </span>
+  );
+}
+function ConfidenceSignal({ confidence }: { confidence: string }) {
+  const normalized = confidence.toLowerCase();
+  const level = ["high", "medium", "low"].includes(normalized)
+    ? normalized
+    : "unassessed";
+  const label = level.charAt(0).toUpperCase() + level.slice(1);
+  return (
+    <span
+      className={`confidence-signal confidence-${level}`}
+      aria-label={`${label} confidence`}
+      title={`${label} confidence`}
+    >
+      <span className="confidence-mark" aria-hidden="true" />
+      <span>{label} confidence</span>
+    </span>
   );
 }
 export function OpportunityRow({
@@ -87,12 +156,10 @@ export function OpportunityRow({
       <h3>{str(opportunity.title, "Untitled opportunity")}</h3>
       <p>{str(opportunity.need)}</p>
       <div className="row-labels">
-        <span>
-          Priority{" "}
-          {{ 1: "High", 2: "Medium", 3: "Low" }[num(opportunity.priority)] ??
-            "Unassessed"}
-        </span>
-        <span>{str(opportunity.confidence, "Unassessed")} confidence</span>
+        <PrioritySignal priority={num(opportunity.priority)} />
+        <ConfidenceSignal
+          confidence={str(opportunity.confidence, "Unassessed")}
+        />
       </div>
       <div className="row-overline">
         <span>
@@ -140,17 +207,15 @@ function ClaimSources({
 function EvidencePassage({
   source,
   findings,
-  selected,
   counter,
   appTitle,
-  back,
+  spokenLanguages,
 }: {
   source: SourceView;
   findings: JsonObject[];
-  selected: boolean;
   counter: boolean;
   appTitle: string;
-  back: string;
+  spokenLanguages: string[];
 }) {
   const sourceProvenance = storedObject(source.provenance_json);
   const provenance =
@@ -163,69 +228,83 @@ function EvidencePassage({
           : "Context website";
   const locale = sourceLocale(source);
   const body = str(source.payload.text) || str(source.payload.description);
-  const excerpts = findings.filter(
-    (finding) => str(finding.sourceId) === source.id,
+  const sourceFindings = findings.filter(
+    (candidate) => str(candidate.sourceId) === source.id,
   );
+  const originalLanguage = str(sourceFindings[0]?.originalLanguage);
+  const translations = new Map<string, string>();
+  const uncertainties = new Set<string>();
+  for (const finding of sourceFindings) {
+    const translation = str(obj(finding.translation).text);
+    const translationLanguage = str(obj(finding.translation).language);
+    if (
+      translation &&
+      translationLanguage &&
+      finding.translationScope === "full_review" &&
+      !languageMatchesAny(originalLanguage, spokenLanguages) &&
+      languageMatchesAny(translationLanguage, spokenLanguages)
+    ) {
+      translations.set(translation, translationLanguage);
+    }
+    for (const uncertainty of strings(finding.uncertainty)) {
+      uncertainties.add(uncertainty);
+    }
+  }
   return (
     <article
       id={sourceAnchor(source.id)}
-      className={`evidence-passage ${selected ? "source-selected" : ""}`}
+      className="evidence-passage"
       tabIndex={-1}
       aria-label={`${counter ? "Counterevidence" : "Evidence"} from ${appTitle}`}
     >
-      <div className="source-heading">
-        <span className="source-kind">
-          {counter ? "Counterevidence" : provenance}
-          {selected && " · Selected source"}
-        </span>
-        <SourceLink source={source} />
+      <div className="evidence-header">
+        <div className="source-heading">
+          <span className="source-kind">
+            {counter ? "Counterevidence" : provenance}
+          </span>
+          <SourceLink source={source} />
+        </div>
+        <h3>{appTitle}</h3>
+        <div className="review-meta" aria-label="Source details">
+          <span className="review-store">{storeLabel(source.store)}</span>
+          {typeof source.payload.rating === "number" && (
+            <RatingStars rating={source.payload.rating} />
+          )}
+          <span>
+            <span className="review-meta-label">Review</span>{" "}
+            {date(str(source.payload.date) || null)}
+          </span>
+          <span>
+            <span className="review-meta-label">Captured</span>{" "}
+            {date(source.captured_at)}
+          </span>
+        </div>
+        <p className="metadata">
+          Requested storefront: {locale.requestedCountry} · Requested language:{" "}
+          {locale.requestedLanguage} · Detected language: {locale.detectedLanguage}
+        </p>
       </div>
-      <h3>{appTitle}</h3>
-      <p className="metadata">
-        {storeLabel(source.store)}
-        {typeof source.payload.rating === "number" &&
-          ` · ${source.payload.rating}/5 stars`}{" "}
-        · {date(str(source.payload.date) || null)} · Captured{" "}
-        {date(source.captured_at)}
-      </p>
-      <p className="metadata">
-        Requested storefront: {locale.requestedCountry} · Requested language: {locale.requestedLanguage} · Detected language: {locale.detectedLanguage}
-      </p>
-      {excerpts.length ? (
-        excerpts.map((finding, index) => (
-          <div key={index}>
-            <blockquote dir="auto">{str(finding.excerpt)}</blockquote>
-            {obj(finding.translation).text && (
-              <div className="translation">
-                <span className="metadata">Translation · English</span>
-                <p>{str(obj(finding.translation).text)}</p>
-              </div>
-            )}
-            {strings(finding.uncertainty).length > 0 && (
-              <p className="metadata">
-                Uncertainty: {strings(finding.uncertainty).join(" ")}
-              </p>
-            )}
-          </div>
-        ))
-      ) : (
+      <div className="evidence-body">
         <blockquote dir="auto">
           {body || "No text passage was captured."}
         </blockquote>
-      )}
-      {excerpts.length > 0 && body && (
-        <details className="original-text">
-          <summary>View full original text</summary>
-          <p dir="auto">{body}</p>
-        </details>
-      )}
-      <div className="source-footer">
-        <span>
-          Stored source <code>{source.review_id ?? source.id}</code>
-        </span>
-        <Link to={`${back}#evidence`} preventScrollReset>
-          Back to evidence list
-        </Link>
+        {translations.size > 0 && (
+          <div className="translation">
+            {[...translations].map(([translation, language]) => (
+              <div key={translation}>
+                <span className="metadata">
+                  {`Translation · ${languageLabel(language)}`}
+                </span>
+                <p>{translation}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {uncertainties.size > 0 && (
+          <p className="metadata">
+            Uncertainty: {[...uncertainties].join(" ")}
+          </p>
+        )}
       </div>
     </article>
   );
@@ -236,14 +315,18 @@ export function OpportunityDetail({
   base,
   selectedSource,
   saveEnabled = true,
+  saved = false,
   sample = false,
+  spokenLanguages = ["en"],
 }: {
   opportunity: JsonObject & { id: string };
   sources: SourceView[];
   base: string;
   selectedSource?: string | null;
   saveEnabled?: boolean;
+  saved?: boolean;
   sample?: boolean;
+  spokenLanguages?: string[];
 }) {
   const verification = obj(opportunity.verification);
   const counts = obj(opportunity.counts);
@@ -264,7 +347,6 @@ export function OpportunityDetail({
   ];
   const passages = sources.filter((source) => allIds.includes(source.id));
   const findings = [...objects(opportunity.evidence), ...citations, ...pricing];
-  const path = opportunityUrl(base, opportunity.id);
   useEffect(() => {
     if (!selectedSource) return;
     const frame = requestAnimationFrame(() =>
@@ -300,9 +382,10 @@ export function OpportunityDetail({
               secondary
               name="intent"
               value="save"
-              disabled={!saveEnabled}
+              disabled={!saveEnabled || saved}
             >
-              Save opportunity
+              <BookmarkIcon filled={saved} />
+              {saved ? "Saved" : "Save opportunity"}
             </Submit>
           </Form>
         )}
@@ -414,13 +497,12 @@ export function OpportunityDetail({
                 key={source.id}
                 source={source}
                 findings={findings}
-                selected={source.id === selectedSource}
                 counter={counterIds.includes(source.id)}
                 appTitle={str(
                   listing?.payload.title,
                   str(source.payload.title, source.app_id ?? "Website passage"),
                 )}
-                back={path}
+                spokenLanguages={spokenLanguages}
               />
             );
           })
@@ -620,7 +702,9 @@ export function ReportWorkspace({
   selectedId,
   selectedSource,
   complete,
+  savedOpportunityIds = [],
   sample = false,
+  spokenLanguages = ["en"],
 }: {
   opportunities: Array<JsonObject & { id: string }>;
   sources: SourceView[];
@@ -628,7 +712,9 @@ export function ReportWorkspace({
   selectedId?: string | null;
   selectedSource?: string | null;
   complete: boolean;
+  savedOpportunityIds?: string[];
   sample?: boolean;
+  spokenLanguages?: string[];
 }) {
   const [search, setSearch] = useState("");
   const selected = opportunities.find((item) => item.id === selectedId);
@@ -682,7 +768,9 @@ export function ReportWorkspace({
             base={base}
             selectedSource={selectedSource}
             saveEnabled={complete}
+            saved={savedOpportunityIds.includes(selected.id)}
             sample={sample}
+            spokenLanguages={spokenLanguages}
           />
         ) : (
           <EmptyState

@@ -32,7 +32,7 @@ import {
   SAMPLE_SOURCES,
 } from "../app/lib/sample";
 import { NewResearchForm } from "../app/components/research-form";
-import { CoverageDetails, OpportunityDetail, ReportWorkspace, type ResearchView } from "../app/components/report";
+import { CoverageDetails, OpportunityDetail, ReportWorkspace, SourceLink, type ResearchView } from "../app/components/report";
 import { Notice, ProgressPanel } from "../app/components/workspace";
 import Saved from "../app/routes/saved";
 
@@ -54,6 +54,7 @@ const values: FormValues = {
   preset: "quick",
   countries: "US, DE",
   languages: "",
+  spokenLanguages: "en",
   appLimit: "10",
   reviewLimit: "2000",
   budgetUsd: "0",
@@ -154,10 +155,19 @@ describe("workspace forms use real operations", () => {
       ),
     ).toThrow(FormError);
   });
+  test("new workspaces use the dark precision theme by default", () => {
+    expect(readSettings(db).appearance).toBe("dark");
+  });
   test("settings persist appearance, model and defaults without secrets", async () => {
     const model = readSettings(db).models[0];
     const result = await workspaceAction(
-      request({ ...values, intent: "settings", appearance: "dark", model }),
+      request({
+        ...values,
+        intent: "settings",
+        appearance: "dark",
+        model,
+        spokenLanguages: "en, DE",
+      }),
       ["settings"],
       undefined,
       db,
@@ -166,6 +176,7 @@ describe("workspace forms use real operations", () => {
     expect(readSettings(db)).toMatchObject({
       appearance: "dark",
       model,
+      spokenLanguages: ["en", "de"],
       defaults: { budgetUsd: 0, countries: ["US", "DE"] },
     });
     const rejected = await workspaceAction(
@@ -345,7 +356,8 @@ describe("rendered workspace state contracts", () => {
     expect(html).toContain('aria-invalid="true"');
     expect(html).toContain('aria-describedby="query-error"');
     expect(html).toContain('role="alert"');
-    expect(html).toContain("United States · Germany");
+    expect(html).toContain('role="checkbox" aria-checked="true">United States');
+    expect(html).toContain('role="checkbox" aria-checked="true">Germany');
   });
   test("mode radios and direction select identify their validation errors", () => {
     const html = render(
@@ -387,13 +399,79 @@ describe("rendered workspace state contracts", () => {
       />,
     );
     expect(html).toContain(`id="${sourceAnchor("sample-review-1")}"`);
-    expect(html).toContain("source-selected");
+    expect(html).not.toContain("source-selected");
+    expect(html).not.toContain("Selected source");
     expect(html).toContain('aria-current="true"');
     expect(html).toContain("Translation · English");
+    expect(html).not.toContain("View full original text");
     expect(html).toContain("買い物中");
     expect(html).toContain("Counterevidence");
     expect(html).toContain("Sample opportunity");
+    expect(html).toContain('aria-label="Medium priority"');
+    expect(html).toContain("priority-bars");
+    expect(html).toContain("Medium priority");
+    expect(html).toContain('aria-label="Low confidence"');
+    expect(html).toContain("confidence-low");
+    expect(html).toContain("Low confidence");
+    expect(html).toContain('aria-label="2 out of 5 stars"');
+    expect(html).toContain("star-filled");
+    expect(html).toContain("star-empty");
+    expect(html).not.toContain("Stored source");
+    expect(html).not.toContain("Back to evidence list");
     expect(html).not.toContain("play.google.com");
+
+    const spokenHtml = render(
+      <ReportWorkspace
+        opportunities={SAMPLE_OPPORTUNITIES}
+        sources={SAMPLE_SOURCES}
+        base="/reference"
+        selectedId="sample-offline"
+        complete={false}
+        spokenLanguages={["de", "ja"]}
+        sample
+      />,
+    );
+    expect(spokenHtml).not.toContain("Translation ·");
+
+    const externalLink = render(
+      <SourceLink
+        source={{
+          ...SAMPLE_SOURCES[1],
+          url: "https://example.com/review",
+          payload: {
+            ...SAMPLE_SOURCES[1].payload,
+            directReviewUrl: true,
+          },
+        }}
+      />,
+    );
+    expect(externalLink).toContain("Open review");
+    expect(externalLink).toContain("external-link-icon");
+    expect(externalLink).toContain("opens in a new tab");
+    expect(externalLink).not.toContain("Open captured review");
+
+    const unsaved = render(
+      <OpportunityDetail
+        opportunity={SAMPLE_OPPORTUNITIES[0]}
+        sources={SAMPLE_SOURCES}
+        base="/reference"
+      />,
+    );
+    expect(unsaved).toContain("Save opportunity");
+    expect(unsaved).toContain('class="bookmark-icon "');
+    expect(unsaved).toContain('fill="none"');
+
+    const saved = render(
+      <OpportunityDetail
+        opportunity={SAMPLE_OPPORTUNITIES[0]}
+        sources={SAMPLE_SOURCES}
+        base="/reference"
+        saved
+      />,
+    );
+    expect(saved).toContain(">Saved</button>");
+    expect(saved).toContain('class="bookmark-icon filled"');
+    expect(saved).toContain('fill="currentColor"');
   });
   test("evidence shows stored request provenance and never invents a detected language", () => {
     const source = {
@@ -445,6 +523,11 @@ describe("rendered workspace state contracts", () => {
     expect(css).toMatch(/\.skip-link:focus\s*\{[^}]*top:\s*12px/);
     expect(css).toMatch(/\.main-content:focus\s*\{[^}]*outline:\s*2px solid var\(--accent\)/);
     expect(css).not.toMatch(/\.main-content:focus\s*\{[^}]*outline:\s*none/);
+  });
+  test("review bodies keep card breathing room and claim links use the accent", () => {
+    const css = readFileSync(new URL("../app/styles/workspace.css", import.meta.url), "utf8");
+    expect(css).toMatch(/\.evidence-body\s*\{[^}]*margin:\s*0 8px 8px/);
+    expect(css).toMatch(/\.claim-links a\s*\{[^}]*color:\s*var\(--accent\)/);
   });
   test("hostile source URLs are never linked and quotations stay escaped", () => {
     const source = {

@@ -33,12 +33,13 @@ export function listResearch(db: DB) { return db.query<RunRow,[]>("SELECT * FROM
 export function readResearch(db: DB, runId: string) {
   const run = getRun(db, runId); const tasks = runTasks(db, runId);
   const opportunities: Array<JsonObject & { id: string }> = db.query<{ id: string; report_json: string }, [string]>("SELECT id,report_json FROM opportunities WHERE run_id=? ORDER BY priority,created_at,id").all(runId).map(row => ({ id: row.id, ...decodeObject(row.report_json) }));
+  const savedOpportunityIds = db.query<{ opportunity_id: string }, [string]>("SELECT saved.opportunity_id FROM saved_opportunities saved JOIN opportunities opportunity ON opportunity.id=saved.opportunity_id WHERE opportunity.run_id=?").all(runId).map(row => row.opportunity_id);
   const reportTask = tasks.find(task => task.stage === "report" && task.result_json);
   const state = discoveryState(db, runId);
   return { run: { ...run, input: decodeObject(run.input_json), settings: decodeObject(run.settings_json), coverageDetails: decodeObject(run.coverage_json) },
     candidates: state.candidates.map(candidate => ({ ...candidate, listing: candidate.sourceId ? decodeObject(db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM sources WHERE id=?").get(candidate.sourceId)!.payload_json) : null })),
     selected: state.selected, tasks: tasks.map(task => ({ ...task, checkpoint: decodeObject(task.checkpoint_json), result: task.result_json ? decodeObject(task.result_json) : null })),
-    opportunities, sources: sourcesForRun(db, runId).map(row => ({ ...row, payload: decodeObject(row.payload_json) })), report: reportTask ? decodeObject(reportTask.result_json!) : null, budget: budgetState(db, runId), worker: workerStatus(db) };
+    opportunities, savedOpportunityIds, sources: sourcesForRun(db, runId).map(row => ({ ...row, payload: decodeObject(row.payload_json) })), report: reportTask ? decodeObject(reportTask.result_json!) : null, budget: budgetState(db, runId), worker: workerStatus(db) };
 }
 export function researchProgress(db: DB, runId: string) {
   const run = getRun(db, runId); const tasks = runTasks(db, runId); const worker = workerStatus(db);
@@ -51,11 +52,18 @@ export function researchProgress(db: DB, runId: string) {
 }
 export function readSettings(db: DB) {
   const saved = getSetting(db, "preferences");
-  return { appearance: saved?.appearance ?? "system", defaults: saved?.defaults ?? defaultResearchSettings(), model: saved?.model ?? DEFAULT_MODEL, configured: apiConfigured(), models: Object.keys(MODEL_CATALOG), modelCatalog: MODEL_CATALOG, setup: "Set OPENAI_API_KEY in the ignored local .env file and restart the worker." };
+  if (!saved) {
+    const defaults = defaultResearchSettings();
+    return { appearance: "dark", defaults, spokenLanguages: defaults.spokenLanguages, model: DEFAULT_MODEL, configured: apiConfigured(), models: Object.keys(MODEL_CATALOG), modelCatalog: MODEL_CATALOG, setup: "Set OPENAI_API_KEY in the ignored local .env file and restart the worker." };
+  }
+  const preferences = z.object({ appearance: z.enum(["system", "light", "dark"]), defaults: z.unknown(), spokenLanguages: z.array(z.string()).min(1).max(20), model: z.string().trim().min(1).max(100) }).strict().parse(saved);
+  const defaults = researchSettings(preferences.defaults);
+  return { ...preferences, defaults, spokenLanguages: defaults.spokenLanguages, configured: apiConfigured(), models: Object.keys(MODEL_CATALOG), modelCatalog: MODEL_CATALOG, setup: "Set OPENAI_API_KEY in the ignored local .env file and restart the worker." };
 }
 export function updateSettings(db: DB, value: unknown): void {
-  const settings = z.object({ appearance: z.enum(["system", "light", "dark"]), defaults: z.unknown(), model: z.string().trim().min(1).max(100) }).strict().parse(value);
-  setSetting(db, "preferences", { appearance: settings.appearance, model: settings.model, defaults: researchSettings(settings.defaults) });
+  const settings = z.object({ appearance: z.enum(["system", "light", "dark"]), defaults: z.unknown(), spokenLanguages: z.array(z.string()).min(1).max(20), model: z.string().trim().min(1).max(100) }).strict().parse(value);
+  const defaults = researchSettings({ ...researchSettings(settings.defaults), spokenLanguages: settings.spokenLanguages });
+  setSetting(db, "preferences", { appearance: settings.appearance, model: settings.model, spokenLanguages: defaults.spokenLanguages, defaults });
 }
 function candidateReview(db: DB, runId: string) {
   const run = getRun(db, runId); if (run.status !== "paused" || run.reason !== "app_review") throw new Error("Candidates can be edited only while waiting for app review");

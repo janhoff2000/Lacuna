@@ -7,6 +7,7 @@ import {
   requireSameOrigin,
 } from "../../server/operations";
 import { parseStoreUrl } from "../../server/collectors/common";
+import { LANGUAGE_TAG, normalizeLanguageTag } from "../../shared/types";
 import {
   CATEGORIES,
   STATUS_LABELS,
@@ -234,12 +235,15 @@ export async function workspaceAction(
       if (!saved.models.includes(model))
         throw new FormError({ model: "Choose one of the configured models." });
       const settings = { ...parsed.settings, model };
-      if (intent === "create") payload = { ...parsed, settings };
+      if (intent === "create") payload = { ...parsed, settings: { ...settings, spokenLanguages: saved.spokenLanguages } };
       else {
         const appearance = String(values.appearance ?? "");
         if (!["system", "light", "dark"].includes(appearance))
           throw new FormError({ appearance: "Choose an appearance." });
-        payload = { appearance, defaults: settings, model };
+        const spokenLanguages = [...new Set(list(String(values.spokenLanguages ?? "")).map(normalizeLanguageTag))];
+        if (!spokenLanguages.length || spokenLanguages.length > 20 || spokenLanguages.some(language => !LANGUAGE_TAG.test(language)))
+          throw new FormError({ spokenLanguages: "Enter 1 to 20 language codes such as en, de, or ja." });
+        payload = { appearance, defaults: { ...settings, spokenLanguages }, spokenLanguages, model };
       }
     } else if (intent === "raise_budget") {
       const budgetUsd = Number(values.budgetUsd);

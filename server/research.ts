@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { decodeObject, encodeJson, type JsonObject, type Store } from "../shared/types";
+import { decodeObject, encodeJson, languageMatchesAny, normalizeLanguageTag, type JsonObject, type Store } from "../shared/types";
 import { transaction, type DB } from "./db";
 import { analyze, AiPaused, type AiTransport } from "./ai";
 import { appleAdapter } from "./collectors/apple";
@@ -256,14 +256,21 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
   const analysis = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
     const checkpoint = decodeObject(task.checkpoint_json); const sourceId = checkpoint.sourceId;
     if (typeof sourceId !== "string") return { findings: [], message: "No trusted selected written reviews available" };
+    const settings = researchSettings(decodeObject(getRun(db, task.run_id).settings_json));
+    const spokenLanguages = (settings.spokenLanguages as string[]).map(normalizeLanguageTag);
+    const translationLanguage = spokenLanguages[0];
     const sources = [sourceById(db, sourceId)]; const quotes = sourceQuotes(sources);
     const passages = reviewPassages(quotes[0].text); if (!passages.length) return { findings: [] };
     const review = { ...decodeObject(sources[0].payload_json) }; delete review.text;
     try {
-      const output = await analyze(db, task, "extraction", { scope: decodeObject(getRun(db, task.run_id).input_json), review: { ...review, passages: passages.map((text, index) => ({ index, text })) } }, quotes, signal, aiOptions);
-      const findings = output.findings.map(({ excerptIndex, ...finding }) => {
+      const output = await analyze(db, task, "extraction", { scope: decodeObject(getRun(db, task.run_id).input_json), review: { ...review, spokenLanguages, translationLanguage, passages: passages.map((text, index) => ({ index, text })) } }, quotes, signal, aiOptions);
+      const translationRequired = output.findings.length > 0 && !languageMatchesAny(output.originalLanguage, spokenLanguages);
+      if (translationRequired !== Boolean(output.translation)) throw new Error("invalid_review_translation");
+      if (output.translation && normalizeLanguageTag(output.translation.language) !== translationLanguage) throw new Error("invalid_translation_language");
+      const findings = output.findings.map(({ excerptIndex, ...finding }, index) => {
         const excerpt = passages[excerptIndex]; if (!excerpt) throw new Error("unknown_review_passage");
-        return { ...finding, sourceId, excerpt, date: quotes[0].date ?? null };
+        const translated = index === 0 && output.translation;
+        return { ...finding, sourceId, excerpt, originalLanguage: output.originalLanguage, ...(translated ? { translation: translated, translationScope: "full_review" as const } : { translation: null, translationScope: null }), date: quotes[0].date ?? null };
       });
       validateCitations({ findings }, quotes);
       return json({ findings });

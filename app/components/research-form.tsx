@@ -10,7 +10,56 @@ import {
   type ActionResult,
   type FormValues,
 } from "../lib/workspace";
-import { ActionFeedback, FieldError, Submit, fieldA11y } from "./workspace";
+import { ActionFeedback, ChipPicker, FieldError, SelectMenu, Submit, fieldA11y } from "./workspace";
+
+const COUNTRY_OPTIONS = [
+  ["US", "United States"], ["GB", "United Kingdom"], ["DE", "Germany"],
+  ["FR", "France"], ["NL", "Netherlands"], ["ES", "Spain"],
+  ["CA", "Canada"], ["AU", "Australia"], ["IT", "Italy"],
+  ["JP", "Japan"], ["BR", "Brazil"], ["IN", "India"],
+].map(([value, label]) => ({ value, label }));
+export const LANGUAGE_OPTIONS = [
+  ["en", "English"], ["de", "German"], ["fr", "French"], ["es", "Spanish"],
+  ["it", "Italian"], ["pt", "Portuguese"], ["nl", "Dutch"], ["ja", "Japanese"],
+  ["ko", "Korean"], ["zh", "Chinese"], ["ar", "Arabic"], ["hi", "Hindi"],
+  ["ru", "Russian"], ["tr", "Turkish"], ["pl", "Polish"], ["sv", "Swedish"],
+].map(([value, label]) => ({ value, label }));
+
+export function LanguagePicker({
+  id = "languages",
+  name = "languages",
+  label = "Additional review languages (optional)",
+  initial,
+  result,
+  description = "Market languages are included automatically. Choose extra Google Play review streams.",
+}: {
+  id?: string;
+  name?: string;
+  label?: string;
+  initial: string[];
+  result?: ActionResult;
+  description?: string;
+}) {
+  const [selected, setSelected] = useState(initial);
+  const options = [
+    ...LANGUAGE_OPTIONS,
+    ...selected
+      .filter((value) => !LANGUAGE_OPTIONS.some((option) => option.value === value))
+      .map((value) => ({ value, label: value })),
+  ];
+  return (
+    <ChipPicker
+      id={id}
+      name={name}
+      label={label}
+      options={options}
+      selected={selected}
+      onChange={setSelected}
+      description={description}
+      {...fieldA11y(name, result)}
+    />
+  );
+}
 
 export function ResearchFields({
   defaults,
@@ -30,9 +79,7 @@ export function ResearchFields({
   const [preset, setPreset] = useState(
     value("preset", str(defaults.preset, "quick")),
   );
-  const [countries, setCountries] = useState(
-    value("countries", strings(defaults.countries).join(", ")),
-  );
+  const [countries, setCountries] = useState(strings(defaults.countries));
   const [appLimit, setAppLimit] = useState(
     value("appLimit", String(num(defaults.appLimit) || 10)),
   );
@@ -54,19 +101,6 @@ export function ResearchFields({
     setReviewLimit(depth === "deep" ? "10000" : "2000");
     setBudget(depth === "deep" ? "5" : "1");
   };
-  const countryNames = countries
-    .split(/[,\n]+/)
-    .map((code) => code.trim().toUpperCase())
-    .filter(Boolean)
-    .map((code) => {
-      try {
-        return (
-          new Intl.DisplayNames(["en"], { type: "region" }).of(code) ?? code
-        );
-      } catch {
-        return code;
-      }
-    });
   return (
     <>
       {!settings && (
@@ -174,44 +208,35 @@ export function ResearchFields({
           </div>
           <FieldError name="stores" result={result} />
         </fieldset>
-        <label htmlFor="countryPreset">
-          Start with a country preset
-          <select
-            id="countryPreset"
-            defaultValue="custom"
-            onChange={(event) => {
-              if (event.target.value !== "custom")
-                setCountries(
-                  COUNTRY_PRESETS[
-                    event.target.value as keyof typeof COUNTRY_PRESETS
-                  ].join(", "),
-                );
-            }}
-          >
-            <option value="custom">Custom countries</option>
-            <option value="international">International sample</option>
-            <option value="us">United States</option>
-            <option value="europe">European sample</option>
-          </select>
-        </label>
-        <label htmlFor="countries">
-          Countries to research
-          <input
-            id="countries"
-            name="countries"
-            value={countries}
-            onChange={(event) => setCountries(event.target.value)}
-            placeholder="US, GB, DE"
-            required
-            {...fieldA11y("countries", result)}
-          />
-        </label>
+        <SelectMenu
+          id="countryPreset"
+          name="countryPreset"
+          label="Start with a country preset"
+          defaultValue="custom"
+          options={[
+            { value: "custom", label: "Custom countries" },
+            { value: "international", label: "International sample" },
+            { value: "us", label: "United States" },
+            { value: "europe", label: "European sample" },
+          ]}
+          onValueChange={(value) => {
+            if (value !== "custom")
+              setCountries(
+                COUNTRY_PRESETS[value as keyof typeof COUNTRY_PRESETS],
+              );
+          }}
+        />
+        <ChipPicker
+          id="countries"
+          name="countries"
+          label="Countries to research"
+          options={COUNTRY_OPTIONS}
+          selected={countries}
+          onChange={setCountries}
+          description="Choose the store markets to search."
+          {...fieldA11y("countries", result)}
+        />
         <FieldError name="countries" result={result} />
-        <p className="field-hint country-preview">
-          {countryNames.length
-            ? countryNames.join(" · ")
-            : "Choose the countries that will actually be searched."}
-        </p>
         <p className="field-hint">
           Countries describe store markets, not reviewers’ residence. Reviews
           retain their original language.
@@ -260,22 +285,21 @@ export function ResearchFields({
           />
           Include cross-platform opportunities
         </label>
-        <label htmlFor="direction">
-          Platform direction
-          <select
-            id="direction"
-            name="direction"
-            defaultValue={value(
-              "direction",
-              str(defaults.direction, "android_to_ios"),
-            )}
-            {...fieldA11y("direction", result, "direction-hint")}
-          >
-            <option value="android_to_ios">Android → iOS</option>
-            <option value="ios_to_android">iOS → Android</option>
-            <option value="both">Both directions</option>
-          </select>
-        </label>
+        <SelectMenu
+          id="direction"
+          name="direction"
+          label="Platform direction"
+          defaultValue={value(
+            "direction",
+            str(defaults.direction, "android_to_ios"),
+          )}
+          options={[
+            { value: "android_to_ios", label: "Android → iOS" },
+            { value: "ios_to_android", label: "iOS → Android" },
+            { value: "both", label: "Both directions" },
+          ]}
+          {...fieldA11y("direction", result, "direction-hint")}
+        />
         <p id="direction-hint" className="field-hint">
           {crossPlatform
             ? "Check counterparts and alternatives in the destination store. Missing matches do not prove a market gap."
@@ -361,24 +385,15 @@ export function ResearchFields({
               <FieldError name="budgetUsd" result={result} />
             </label>
           </div>
-          <label htmlFor="languages">
-            Additional review languages (optional)
-            <input
-              id="languages"
-              name="languages"
-              defaultValue={value(
-                "languages",
-                strings(defaults.languages).join(", "),
-              )}
-              placeholder="ja, pt, ar"
-              {...fieldA11y("languages", result)}
-            />
-          </label>
+          <LanguagePicker
+            initial={
+              typeof values.languages === "string"
+                ? values.languages.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)
+                : strings(defaults.languages)
+            }
+            result={result}
+          />
           <FieldError name="languages" result={result} />
-          <p className="field-hint">
-            Market languages are included automatically. Add language codes for
-            extra Google Play review streams.
-          </p>
           {!settings && (
             <>
               <label htmlFor="websiteUrls">

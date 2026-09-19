@@ -27,7 +27,7 @@ export function openDatabase(path?: string): DB {
     db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     // Both entry points run from the repository root. A path relative to this
     // module would point inside build/server after React Router bundles it.
-    const migrations = [resolve("server/migrations/001_foundation.sql"), resolve("server/migrations/002_research.sql"), resolve("server/migrations/003_parallel_analysis.sql"), resolve("server/migrations/004_parallel_ai_reservations.sql")];
+    const migrations = [resolve("server/migrations/001_foundation.sql"), resolve("server/migrations/002_research.sql"), resolve("server/migrations/003_parallel_analysis.sql"), resolve("server/migrations/004_parallel_ai_reservations.sql"), resolve("server/migrations/005_spoken_languages.sql")];
     transaction(db, () => {
       const { user_version: current } = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
       if (current > migrations.length) throw new Error("Database belongs to a newer application version");
