@@ -27,7 +27,7 @@ export function googleAdapter(api: GoogleClient = googlePlay as unknown as Googl
     async reviews(appId, locale, cursor, signal) {
       signal.throwIfAborted(); const request: JsonObject = { ...options(locale), appId, sort: api.sort.NEWEST, paginate: true, num: 100, ...(cursor ? { nextPaginationToken: cursor } : {}) };
       const response = await api.reviews(request); signal.throwIfAborted();
-      return { reviews: response.data.map(row => normalizeReview("google", appId, row, locale, request)), nextCursor: response.nextPaginationToken || null, exhausted: !response.data.length || !response.nextPaginationToken, request };
+      return { reviews: response.data.map(row => normalizeReview("google", appId, row, locale, request, true)), nextCursor: response.nextPaginationToken || null, exhausted: !response.data.length || !response.nextPaginationToken, request };
     },
   };
 }

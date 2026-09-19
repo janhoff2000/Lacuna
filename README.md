@@ -98,12 +98,13 @@ continuation pauses; raising the run budget does not clear that uncertainty.
 Inspect and reconcile the attempt before resuming. The displayed price snapshot
 is an estimate, not a provider invoice.
 
-Review IDs from the real store adapters are currently quarantined from numerical
-support counts, AI selection, and cross-run reuse. This is deliberately
-conservative: the required repeated-session/store/sort/locale identity study has
-not yet established that those IDs remain stable. A report can therefore contain
-less evidence than a preset ceiling permits, and must not be read as a
-representative market statistic.
+Real store review IDs are treated as stable for numerical support counts, AI
+selection, and cross-run reuse. This is an explicit product assumption, based on
+two immediate bounded samples that returned the same 840 IDs and unchanged review
+payloads; it is not a guarantee from Apple or Google. If a later page, locale, or
+replacement returns conflicting content for the same ID, Lacuna quarantines that
+ID from counts, analysis, and reuse for that run. Reports remain purposive samples,
+not representative market statistics.
 
 ## Back up and restore the SQLite database
 

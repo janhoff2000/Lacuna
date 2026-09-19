@@ -46,12 +46,13 @@ provenance. Search intents preserve the supplied scope. This fallback does not
 translate search terms. Review-language requests are explicit and never imply the
 authors' residence. Google initially shares one anchor country per language.
 
-Current production limitation: the existing scraper trial did not establish
-review-ID stability across repeated sessions/sorts/locales. Both real adapters
-therefore preserve reviews but quarantine their identities from numeric support,
-selection for AI, and cross-run review reuse. They must remain untrusted until the
-identity prerequisite is completed and documented for supported scopes. Fake
-adapters exercise the trusted end-to-end workflow without a paid or live AI call.
+Current product assumption: both real adapters treat a non-empty review ID as
+stable for numeric support, selection for AI, and cross-run review reuse. Two
+immediate bounded samples returned the same 840 IDs with unchanged review
+payloads, but this does not prove stability across time or sort orders. A
+conflicting ID remains quarantined across all later pages, locales, replacement
+segments, and reuse decisions in that run. Fake adapters exercise the same trusted
+end-to-end workflow without a paid or live AI call.
 
 Website fetching uses validated public addresses pinned to the actual HTTP
 connection, same-site redirects, robots rules, bounded bytes/time, and at most

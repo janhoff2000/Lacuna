@@ -34,11 +34,10 @@ export function budgetState(db: DB, runId: string) {
   const committedUsd = rows.reduce((sum, row) => sum + (row.status === "finalized" ? row.known_charge_usd ?? row.estimated_usd ?? row.reserved_usd : Math.max(row.reserved_usd, row.known_charge_usd ?? 0)), 0);
   return { committedUsd, remainingUsd: Math.max(0, getRun(db, runId).budget_usd - committedUsd), unknown: rows.some(row => row.status === "unknown"), knownChargeUsd: rows.reduce((sum, row) => sum + (row.known_charge_usd ?? 0), 0) };
 }
-export function reserveAi(db: DB, taskId: string, attemptId: string, ceiling: { maxInputTokens: number; maxOutputTokens: number; model?: string; requestKey?: string }, catalog: Readonly<Record<string, ModelPrice>> = MODEL_CATALOG, now = Date.now()): { id: string; reservedUsd: number } | { refused: "pricing_unknown" | "budget" | "unknown_cost" | "in_flight" } {
+export function reserveAi(db: DB, taskId: string, attemptId: string, ceiling: { maxInputTokens: number; maxOutputTokens: number; model?: string; requestKey?: string }, catalog: Readonly<Record<string, ModelPrice>> = MODEL_CATALOG, now = Date.now()): { id: string; reservedUsd: number } | { refused: "pricing_unknown" | "budget" | "unknown_cost" } {
   tokens(ceiling.maxInputTokens); tokens(ceiling.maxOutputTokens);
   return transaction(db, () => {
     const task = assertAttempt(db, taskId, attemptId);
-    if (db.query("SELECT id FROM ai_requests WHERE status='in_flight'").get()) return { refused: "in_flight" as const };
     const modelName = ceiling.model ?? DEFAULT_MODEL; const model = catalog[modelName];
     const state = budgetState(db, task.run_id);
     const refused = !validPrice(model) ? "pricing_unknown" : state.unknown ? "unknown_cost" : state.remainingUsd < price(ceiling.maxInputTokens, ceiling.maxOutputTokens, model) ? "budget" : null;

@@ -41,8 +41,8 @@ const fakeAi: AiTransport = async request => {
   const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
   const data = JSON.parse(request.input as string).untrustedResearchData;
   let output: unknown;
-  if (kind === "lacuna_extraction") output = { findings: data.reviews.map((review: { sourceId: string; date: string }) => ({ sourceId: review.sourceId, excerpt: "I need offline tracking.", translation: null, need: "Reliable offline tracking", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", date: review.date, uncertainty: [] })) };
-  else if (kind === "lacuna_grouping") output = { themes: [{ title: "Reliable offline tracking", need: "Reliable offline tracking", sourceIds: data.findings.map((f: { sourceId: string }) => f.sourceId), audience: null, audienceInferred: false, uncertainty: [] }] };
+  if (kind === "lacuna_extraction") output = { findings: [{ excerptIndex: 0, translation: null, need: "Reliable offline tracking", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", uncertainty: [] }] };
+  else if (kind === "lacuna_grouping") output = { themes: [{ title: "Reliable offline tracking", need: "Reliable offline tracking", findingIndexes: data.findings.map((_f: unknown, index: number) => index), audience: null, audienceInferred: false, uncertainty: [] }] };
   else if (kind === "lacuna_opportunities") output = { opportunities: [{ key: "offline", title: "Reliable offline tracking", need: "Reliable offline tracking", audience: null, audienceInferred: false, perspective: "poor_execution", direction: null, sourceIds: [...new Set(data.themes.flatMap((theme: { sourceIds: string[] }) => theme.sourceIds))], counterSourceIds: [], impact: "moderate", uncertainty: [] }] };
   else if (kind === "lacuna_verification") {
     const source = data.sources.find((source: QuoteSource) => source.kind === "listing");
@@ -69,6 +69,50 @@ async function drive(runId: string, dependencies = deps(), limit = 120) {
   throw new Error("Pipeline did not finish within deterministic step bound");
 }
 describe("fixed research pipeline with fake adapters", () => {
+  test("each extracted finding inherits its source from the one-review task", async () => {
+    const runId = createResearch(db, input, settings);
+    await drive(runId);
+    const analysis = runTasks(db, runId).filter(task => task.stage === "analysis");
+    expect(analysis).toHaveLength(6);
+    for (const task of analysis) {
+      const sourceId = decodeObject(task.checkpoint_json).sourceId;
+      const findings = decodeObject(task.result_json!).findings as Array<Record<string, unknown>>;
+      expect(typeof sourceId).toBe("string");
+      expect(findings).toHaveLength(1);
+      expect(findings[0].sourceId).toBe(sourceId);
+    }
+  });
+  test("extraction does not ask the model to return a review identifier", async () => {
+    const runId = createResearch(db, input, { ...settings, stores: ["apple"], countries: ["US"] });
+    let receivedOneReview = false; let receivedSourceId: unknown = "not-called";
+    const transport: AiTransport = async request => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      const data = JSON.parse(request.input as string).untrustedResearchData;
+      if (kind !== "lacuna_extraction") return fakeAi(request, new AbortController().signal);
+      receivedOneReview = !!data.review; receivedSourceId = data.review?.sourceId;
+      expect(data.review?.passages).toEqual([{ index: 0, text: sourceText }]);
+      return { id: "single-review", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ findings: [{ excerptIndex: 0, translation: null, need: "Reliable offline tracking", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", uncertainty: [] }] }) };
+    };
+    await drive(runId, deps({ aiTransport: transport }));
+    expect(receivedOneReview).toBe(true);
+    expect(receivedSourceId).toBeUndefined();
+    const finding = (decodeObject(runTasks(db, runId).find(task => task.stage === "analysis")!.result_json!).findings as Array<Record<string, unknown>>)[0];
+    expect(typeof finding.sourceId).toBe("string");
+    expect(finding.excerpt).toBe(sourceText);
+  });
+  test("a rejected opportunity response retains source-backed theme results", async () => {
+    const runId = createResearch(db, input, { ...settings, stores: ["apple"], countries: ["US"] });
+    const transport: AiTransport = async request => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind === "lacuna_opportunities") return { id: "bad-opportunities", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ opportunities: [{ key: "invalid", title: "Invalid" }] }) };
+      return fakeAi(request, new AbortController().signal);
+    };
+    await drive(runId, deps({ aiTransport: transport }));
+    const report = readResearch(db, runId);
+    expect(report.opportunities).toHaveLength(1);
+    expect(report.opportunities[0]).toMatchObject({ title: "Reliable offline tracking" });
+    expect(report.opportunities[0].uncertainty).toContain("Preliminary opportunity assembled from source-backed themes after opportunity synthesis failed validation.");
+  });
   test("progressive discovery, locale dedup, extraction, themes, verification and report; notes survive refresh", async () => {
     const runId = createResearch(db, input, settings);
     const result = await drive(runId); expect(result.status).toBe("completed"); expect(result.coverage).toBe("gaps");
@@ -166,18 +210,20 @@ describe("structured AI safety and accounting", () => {
   function task() { const runId = createResearch(db, input, settings); activateNextRun(db); const taskId = createTask(db, runId, "discovery", "analysis-test"); return { runId, task: claimTask(db, runId)!, taskId }; }
   const evidence = [{ id: "source-1", text: "Ich brauche einen Offline-Modus.", date: null }];
   const finding = { sourceId: "source-1", excerpt: "Ich brauche einen Offline-Modus.", translation: { label: "Translation", language: "en", text: "I need an offline mode." }, need: "Offline mode", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", date: null, uncertainty: [] };
+  const extractionFinding = Object.fromEntries(Object.entries(finding).filter(([key]) => key !== "sourceId" && key !== "date" && key !== "excerpt"));
+  const indexedExtractionFinding = { ...extractionFinding, excerptIndex: 0 };
   test("prompt injection stays source data, literal quote mismatch rejects, translations are labeled", () => {
-    expect(instructions("extraction")).toContain("untrusted quoted data"); expect(schemas.extraction.parse({ findings: [finding] })).toBeTruthy();
+    expect(instructions("extraction")).toContain("untrusted quoted data"); expect(schemas.extraction.parse({ findings: [indexedExtractionFinding] })).toBeTruthy();
     expect(() => validateCitations({ findings: [finding] }, evidence)).not.toThrow();
     expect(() => validateCitations({ findings: [{ ...finding, excerpt: "I need an offline mode." }] }, evidence)).toThrow("quote_mismatch");
-    expect(() => schemas.extraction.parse({ findings: [{ ...finding, translation: { text: "Offline" } }] })).toThrow();
+    expect(() => schemas.extraction.parse({ findings: [{ ...indexedExtractionFinding, translation: { text: "Offline" } }] })).toThrow();
   });
   test("invalid response gets one recorded repair with store false, schema and bounded output", async () => {
     const current = task(); let calls = 0;
     const transport: AiTransport = async request => {
       expect(request.store).toBe(false); expect(request.max_output_tokens).toBeLessThanOrEqual(6000); expect(request.text?.format?.type).toBe("json_schema");
       expect(String(request.input)).toContain(sourceText);
-      return { id: `response-${++calls}`, output_text: calls === 1 ? JSON.stringify({ findings: [{ ...finding, excerpt: "fake quote" }] }) : JSON.stringify({ findings: [finding] }), usage: { input_tokens: 200, output_tokens: 100 } };
+      return { id: `response-${++calls}`, output_text: calls === 1 ? JSON.stringify({ findings: [{ ...indexedExtractionFinding, translation: { text: "Offline" } }] }) : JSON.stringify({ findings: [indexedExtractionFinding] }), usage: { input_tokens: 200, output_tokens: 100 } };
     };
     const result = await analyze(db, current.task, "extraction", { text: sourceText }, evidence, new AbortController().signal, { configured: true, transport });
     expect(result.findings).toHaveLength(1); expect(calls).toBe(2); expect(db.query("SELECT id FROM ai_requests").all()).toHaveLength(2);
@@ -205,11 +251,11 @@ describe("server mutation and migration boundaries", () => {
     expect(() => createResearch(db, { ...input, urls: ["http://localhost"] }, settings)).toThrow();
     expect(searchIntents({ ...input, mode: "topic", query: Array.from({ length: 20 }, (_, i) => `scope${i}`).join("; ") }, "quick")).toHaveLength(6);
   });
-  test("migration preserves old saved notes/status and records version two idempotently", () => {
+  test("migration preserves old saved notes/status and records version four idempotently", () => {
     const file = join(directory, "legacy.sqlite"); const legacy = new Database(file);
     legacy.exec(readFileSync(new URL("../server/migrations/001_foundation.sql", import.meta.url), "utf8"));
     legacy.exec("PRAGMA user_version=1; INSERT INTO runs(id,input_json,settings_json,policy_version,status,stage,budget_usd,created_at,updated_at) VALUES('r','{}','{}','v1','completed','report',1,1,1); INSERT INTO opportunities(id,run_id,report_key,title,priority,confidence,report_json,created_at) VALUES('o','r','k','Title',1,'low','{}',1); INSERT INTO saved_opportunities(id,opportunity_id,status,notes,created_at,updated_at) VALUES('s','o','exploring','Keep me',1,1);"); legacy.close();
-    const migrated = openDatabase(file); expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 2 }); expect(migrated.query("SELECT status,notes FROM saved_opportunities").get()).toEqual({ status: "investigating", notes: "Keep me" }); expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([]); migrated.close();
+    const migrated = openDatabase(file); expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 4 }); expect(migrated.query("SELECT status,notes FROM saved_opportunities").get()).toEqual({ status: "investigating", notes: "Keep me" }); expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([]); migrated.close();
   });
 });
 
@@ -423,18 +469,17 @@ describe("Task 3 review regressions", () => {
   });
 
   test("opportunity frequency uses successful analysis count when one batch fails", async () => {
-    const base = adapter("apple"); const date = new Date().toISOString(); let failedBatch: string | null = null;
+    const base = adapter("apple"); const date = new Date().toISOString(); let failedResponses = 0;
     const apple: StoreAdapter = { ...base, reviews: async (appId, locale) => ({ reviews: Array.from({ length: 24 }, (_, i) => normalizeReview("apple", appId, { id: `review-${i}`, text: sourceText, score: i % 5 + 1, date }, locale, {}, true)), nextCursor: null, exhausted: true, request: {} }) };
     const transport: AiTransport = async (request, signal) => {
       if (request.text?.format?.type === "json_schema" && request.text.format.name === "lacuna_extraction") {
-        const data = JSON.parse(request.input as string).untrustedResearchData; const batch = data.reviews[0].sourceId; failedBatch ??= batch;
-        if (batch === failedBatch) return { id: "invalid-batch", output_text: "{}", usage: { input_tokens: 100, output_tokens: 100 } };
+        if (failedResponses++ < 2) return { id: "invalid-review", output_text: "{}", usage: { input_tokens: 100, output_tokens: 100 } };
       }
       return fakeAi(request, signal);
     };
     const runId = createResearch(db, input, { ...settings, stores: ["apple"], countries: ["US"], appLimit: 1, reviewLimit: 24 }); await drive(runId, deps({ apple, aiTransport: transport }));
-    const report = readResearch(db, runId); expect(report.report?.counts).toMatchObject({ collected: 24, selected: 24, analyzed: 12 });
-    expect(report.opportunities[0].denominator).toBe(12); expect(report.opportunities[0].sampleCounts).toEqual({ collected: 24, selected: 24, analyzed: 12 });
-    expect(researchProgress(db, runId).counts.analyzed).toBe(12);
+    const report = readResearch(db, runId); expect(report.report?.counts).toMatchObject({ collected: 24, selected: 24, analyzed: 23 });
+    expect(report.opportunities[0].denominator).toBe(23); expect(report.opportunities[0].sampleCounts).toEqual({ collected: 24, selected: 24, analyzed: 23 });
+    expect(researchProgress(db, runId).counts.analyzed).toBe(23);
   });
 });

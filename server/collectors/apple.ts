@@ -5,7 +5,6 @@ import type { JsonObject } from "../../shared/types";
 
 type AppleClient = { search(options: JsonObject): Promise<unknown[]>; list(options: JsonObject): Promise<unknown[]>; app(options: JsonObject): Promise<unknown>; similar(options: JsonObject): Promise<unknown[]>; reviews(options: JsonObject): Promise<unknown[]>; category: Record<string, number>; collection: { TOP_FREE_IOS: string }; sort: { RECENT: string } };
 const client = appleStore as AppleClient;
-// No trusted production scope yet: the recorded trial did not repeat IDs across sessions/sorts.
 export function appleAdapter(api: AppleClient = client): StoreAdapter {
   const options = (locale: Locale): JsonObject => ({ country: locale.country.toLowerCase(), lang: locale.language, requestOptions: { timeout: 15_000 } });
   return {
@@ -36,7 +35,7 @@ export function appleAdapter(api: AppleClient = client): StoreAdapter {
       if (!Number.isSafeInteger(page) || page < 1 || page > LIMITS.appleStreamPages) throw new Error("Invalid Apple page cursor");
       signal.throwIfAborted(); const request = { ...options(locale), id: appId, page, sort: api.sort.RECENT };
       const rows = await api.reviews(request); signal.throwIfAborted();
-      return { reviews: rows.map(row => normalizeReview("apple", appId, row, locale, request)), nextCursor: rows.length && page < LIMITS.appleStreamPages ? String(page + 1) : null, exhausted: !rows.length, request };
+      return { reviews: rows.map(row => normalizeReview("apple", appId, row, locale, request, true)), nextCursor: rows.length && page < LIMITS.appleStreamPages ? String(page + 1) : null, exhausted: !rows.length, request };
     },
   };
 }

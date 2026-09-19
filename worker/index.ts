@@ -5,7 +5,7 @@ const stop = () => shutdown.abort();
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
 try {
-  await runWorker({ signal: shutdown.signal, onReady: () => console.info("Lacuna worker ready. Eligible queued runs can start.") });
+  await runWorker({ signal: shutdown.signal, concurrency: 100, onReady: () => console.info("Lacuna worker ready. Eligible queued runs can start.") });
 } catch (error) {
   console.error(error instanceof Error && error.message.startsWith("Another worker") ? error.message : "Worker failed; inspect local configuration and database access.");
   process.exitCode = 1;

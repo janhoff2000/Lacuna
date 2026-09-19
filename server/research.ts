@@ -11,7 +11,7 @@ import { allocateReviews, collectionReuse, equalShares, evidenceConfidence, FRES
 import { researchInputSchema, researchSettings, searchIntents } from "./research-input";
 import { assertAttempt, checkpointTask, getRun, markCoverage, type RunRow, type TaskRow } from "./runs";
 import { disqualifyReview, reviewDisqualified, saveSource, type SourceSnapshot } from "./sources";
-import { schemas, validateCitations, validateStageLinks, type Finding, type ProposedOpportunity, type QuoteSource } from "./prompts";
+import { findingSchema, schemas, themeSchema, validateCitations, validateStageLinks, type Finding, type ProposedOpportunity, type QuoteSource } from "./prompts";
 import type { Handlers, StagePlanner } from "./pipeline";
 
 const json = (value: unknown): JsonObject => decodeObject(encodeJson(value));
@@ -40,6 +40,14 @@ function sourceQuotes(rows: SourceRow[]): QuoteSource[] {
       kind: row.kind as QuoteSource["kind"], url: row.url,
       provenance: row.kind === "listing" ? "official_listing" : row.kind === "review" ? "user_review" : typeof provenance.officialListingSourceId === "string" ? "official_website" : provenance.userSupplied === true ? "user_website" : "unknown" };
   });
+}
+function reviewPassages(text: string): string[] {
+  const passages: string[] = [];
+  for (let start = 0; start < text.length; start += 2000) {
+    const passage = text.slice(start, start + 2000);
+    if (passage) passages.push(passage);
+  }
+  return passages;
 }
 const reviewBody = (value: { text?: unknown; title?: unknown; rating?: unknown }) => hash({ text: value.text ?? "", title: value.title ?? "", rating: value.rating ?? null });
 function persistSnapshot(db: DB, task: TaskRow, kind: SourceSnapshot["kind"], payload: Listing | WrittenReview, selected = false, version = COLLECTOR_VERSION): string {
@@ -246,11 +254,19 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
   };
 
   const analysis = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
-    const checkpoint = decodeObject(task.checkpoint_json); const ids = checkpoint.sourceIds as string[] ?? [];
-    if (!ids.length) return { findings: [], message: "No trusted selected written reviews available" };
-    const sources = ids.map(id => sourceById(db, id)); const quotes = sourceQuotes(sources);
+    const checkpoint = decodeObject(task.checkpoint_json); const sourceId = checkpoint.sourceId;
+    if (typeof sourceId !== "string") return { findings: [], message: "No trusted selected written reviews available" };
+    const sources = [sourceById(db, sourceId)]; const quotes = sourceQuotes(sources);
+    const passages = reviewPassages(quotes[0].text); if (!passages.length) return { findings: [] };
+    const review = { ...decodeObject(sources[0].payload_json) }; delete review.text;
     try {
-      return json(await analyze(db, task, "extraction", { scope: decodeObject(getRun(db, task.run_id).input_json), reviews: sources.map((source, index) => ({ sourceId: source.id, ...decodeObject(source.payload_json), text: quotes[index].text })) }, quotes, signal, aiOptions));
+      const output = await analyze(db, task, "extraction", { scope: decodeObject(getRun(db, task.run_id).input_json), review: { ...review, passages: passages.map((text, index) => ({ index, text })) } }, quotes, signal, aiOptions);
+      const findings = output.findings.map(({ excerptIndex, ...finding }) => {
+        const excerpt = passages[excerptIndex]; if (!excerpt) throw new Error("unknown_review_passage");
+        return { ...finding, sourceId, excerpt, date: quotes[0].date ?? null };
+      });
+      validateCitations({ findings }, quotes);
+      return json({ findings });
     } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, task.run_id).status !== "running") throw error; gap(db, task.run_id, task.dedupe_key, "Analysis batch failed schema or evidence validation"); return { findings: [], failed: true }; }
   };
   const grouping = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
@@ -258,23 +274,46 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     const sources = sourcesForRun(db, task.run_id, "review", true); const quotes = sourceQuotes(sources);
     let checkpoint = decodeObject(task.checkpoint_json);
     // Each chunk stays bounded; grouping is then consolidated from compact themes.
-    const groupRefs = (checkpoint.groupRefs ?? []) as string[];
+    const groupRefs = (checkpoint.groupRefs ?? []) as Array<string | null>;
+    const themeBatches = (checkpoint.themeBatches ?? []) as JsonObject[][];
     try {
-      for (let offset = groupRefs.length * 100; offset < findings.length; offset += 100) {
+      for (let offset = themeBatches.length * 100; offset < findings.length; offset += 100) {
         const batch = findings.slice(offset, offset + 100); const ids = new Set(batch.map(f => f.sourceId));
-        const output = await analyze(db, task, "grouping", { findings: batch }, quotes.filter(q => ids.has(q.id)), signal, aiOptions);
-        const stored = db.query<{ id: string }, [string]>("SELECT id FROM analyses WHERE stage='grouping' AND output_json=? LIMIT 1").get(encodeJson(output));
-        if (!stored) throw new Error("Grouping analysis was not persisted");
-        groupRefs.push(stored.id); checkpoint = { ...checkpoint, substage: "grouping", groupRefs, themesPreview: JSON.parse(encodeJson(output.themes)), groupedFindings: Math.min(offset + 100, findings.length) }; checkpointTask(db, task.id, task.attempt_id!, checkpoint);
+        try {
+          const output = await analyze(db, task, "grouping", { findings: batch }, quotes.filter(q => ids.has(q.id)), signal, aiOptions);
+          const stored = db.query<{ id: string }, [string]>("SELECT id FROM analyses WHERE stage='grouping' AND output_json=? LIMIT 1").get(encodeJson(output));
+          if (!stored) throw new Error("Grouping analysis was not persisted");
+          const themes = output.themes.map(({ findingIndexes, ...theme }) => {
+            const sourceIds = [...new Set(findingIndexes.map(index => {
+              const finding = batch[index]; if (!finding) throw new Error("unknown_group_finding");
+              return finding.sourceId;
+            }))];
+            return themeSchema.parse({ ...theme, sourceIds });
+          });
+          groupRefs.push(stored.id); themeBatches.push(themes);
+          checkpoint = { ...checkpoint, substage: "grouping", groupRefs, themeBatches, themesPreview: themes, groupedFindings: Math.min(offset + 100, findings.length) }; checkpointTask(db, task.id, task.attempt_id!, checkpoint);
+        } catch (error) {
+          if (error instanceof AiPaused || signal.aborted || getRun(db, task.run_id).status !== "running") throw error;
+          gap(db, task.run_id, `group:${offset}`, "Theme grouping chunk failed validation; its unavailable evidence is excluded from conclusions");
+          groupRefs.push(null); themeBatches.push([]);
+          checkpoint = { ...checkpoint, substage: "grouping", groupRefs, themeBatches, groupedFindings: Math.min(offset + 100, findings.length) }; checkpointTask(db, task.id, task.attempt_id!, checkpoint);
+        }
       }
-      const allThemes = groupRefs.flatMap(id => schemas.grouping.parse(JSON.parse(db.query<{ output_json: string }, [string]>("SELECT output_json FROM analyses WHERE id=?").get(id)!.output_json)).themes);
+      const allThemes = themeBatches.flatMap(themes => themes.map(theme => themeSchema.parse(theme)));
       // The synthesis input is bounded; all original group outputs remain linked
       // in the checkpoint for inspection. Rank by distinct supporting sources.
       const themes = allThemes.sort((a, b) => new Set(b.sourceIds).size - new Set(a.sourceIds).size || a.title.localeCompare(b.title)).slice(0, 30);
       if (allThemes.length > themes.length) gap(db, task.run_id, "theme_limit", "Only the 30 batch themes with most distinct source support entered bounded opportunity synthesis; all batch themes remain linked in checkpoints");
       const settings = researchSettings(decodeObject(getRun(db, task.run_id).settings_json));
-      const preliminary = await analyze(db, task, "opportunities", { themes, scope: decodeObject(getRun(db, task.run_id).input_json), perspectives: ["missing_capability", "underserved_audience", "poor_execution", ...(settings.crossPlatform ? ["cross_platform"] : [])], direction: settings.direction }, quotes, signal, aiOptions);
-      const opportunities = preliminary.opportunities.filter(opportunity => opportunity.perspective !== "cross_platform" ? opportunity.direction === null : settings.crossPlatform && opportunity.direction && (settings.direction === "both" || settings.direction === opportunity.direction));
+      let opportunities: ProposedOpportunity[];
+      try {
+        const preliminary = await analyze(db, task, "opportunities", { themes, scope: decodeObject(getRun(db, task.run_id).input_json), perspectives: ["missing_capability", "underserved_audience", "poor_execution", ...(settings.crossPlatform ? ["cross_platform"] : [])], direction: settings.direction }, quotes, signal, aiOptions);
+        opportunities = preliminary.opportunities.filter(opportunity => opportunity.perspective !== "cross_platform" ? opportunity.direction === null : settings.crossPlatform && opportunity.direction && (settings.direction === "both" || settings.direction === opportunity.direction));
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, task.run_id).status !== "running") throw error;
+        gap(db, task.run_id, "opportunities", "Opportunity synthesis failed validation; source-backed themes are shown as preliminary opportunities");
+        opportunities = fallbackOpportunities(themes);
+      }
       checkpointTask(db, task.id, task.attempt_id!, json({ ...checkpoint, substage: "provisional_opportunities", themes, opportunities: opportunities.map(o => ({ ...o, status: "Preliminary" })) }));
       return json({ themes, opportunities });
     } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, task.run_id).status !== "running") throw error; gap(db, task.run_id, "grouping", "Theme/opportunity synthesis failed validation"); return { themes: [], opportunities: [] }; }
@@ -388,8 +427,8 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     }
     if (stage === "analysis") {
       selectCollectedReviews(db, run, now()); const selected = sourcesForRun(db, run.id, "review", true);
-      if (!selected.length) return [{ key: "empty", checkpoint: { sourceIds: [] } }];
-      return Array.from({ length: Math.ceil(selected.length / 12) }, (_, index) => ({ key: `batch:${index}`, checkpoint: { sourceIds: selected.slice(index * 12, index * 12 + 12).map(row => row.id) } }));
+      if (!selected.length) return [{ key: "empty", checkpoint: { sourceId: null } }];
+      return selected.map(row => ({ key: `review:${row.id}`, checkpoint: { sourceId: row.id } }));
     }
     return [{ key: stage }];
   };
@@ -397,11 +436,20 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
 }
 
 function emptyCollection(now: number): JsonObject { return { version: randomUUID(), scopeHash: "empty", startedAt: now, endedAt: null, quota: 0, uniqueCount: 0, pages: 0, requestAttempts: 0, noNewIdPages: 0, cursor: null, seenCursors: [], stopReason: null, complete: false }; }
+function fallbackOpportunities(themes: Array<{ title: string; need: string; sourceIds: string[]; audience: string | null; audienceInferred: boolean; uncertainty: string[] }>): ProposedOpportunity[] {
+  return themes.map(theme => ({ key: `theme-${hash({ title: theme.title, sourceIds: theme.sourceIds })}`, title: theme.title, need: theme.need, audience: theme.audience, audienceInferred: theme.audienceInferred, perspective: "poor_execution", direction: null, sourceIds: theme.sourceIds, counterSourceIds: [], impact: "moderate", uncertainty: ["Preliminary opportunity assembled from source-backed themes after opportunity synthesis failed validation.", ...theme.uncertainty] }));
+}
 function allFindings(db: DB, runId: string): Finding[] {
-  return runTasks(db, runId).filter(task => task.stage === "analysis" && task.result_json).flatMap(task => schemas.extraction.parse({ findings: decodeObject(task.result_json!).findings ?? [] }).findings);
+  return runTasks(db, runId).filter(task => task.stage === "analysis" && task.result_json).flatMap(task => {
+    const findings = decodeObject(task.result_json!).findings ?? [];
+    return Array.isArray(findings) ? findings.map(finding => findingSchema.parse(finding)) : [];
+  });
 }
 export function successfullyAnalyzedSourceIds(db: DB, runId: string): Set<string> {
-  return new Set(runTasks(db, runId).filter(task => task.stage === "analysis" && task.status === "completed" && task.result_json && decodeObject(task.result_json).failed !== true).flatMap(task => decodeObject(task.checkpoint_json).sourceIds as string[] ?? []));
+  return new Set(runTasks(db, runId).filter(task => task.stage === "analysis" && task.status === "completed" && task.result_json && decodeObject(task.result_json).failed !== true).flatMap(task => {
+    const sourceId = decodeObject(task.checkpoint_json).sourceId;
+    return typeof sourceId === "string" ? [sourceId] : [];
+  }));
 }
 function provisional(db: DB, runId: string): ProposedOpportunity[] {
   const task = runTasks(db, runId).find(task => task.stage === "grouping" && task.result_json);

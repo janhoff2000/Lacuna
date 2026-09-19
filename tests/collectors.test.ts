@@ -31,10 +31,10 @@ describe("real adapter normalization and store scope", () => {
     const apple = appleAdapter(api);
     expect(await apple.search("sleep", locale, signal())).toHaveLength(10);
     expect(calls[0]).toMatchObject({ idsOnly: true, num: 10, country: "us" });
-    expect(await apple.reviews("1", locale, null, signal())).toMatchObject({ nextCursor: "2", exhausted: false });
+    expect(await apple.reviews("1", locale, null, signal())).toMatchObject({ nextCursor: "2", exhausted: false, reviews: [{ reviewId: "x", identityVerified: true, identityReason: "validated_scope" }] });
     await expect(apple.reviews("1", locale, "11", signal())).rejects.toThrow();
     const google = googleAdapter({ ...api, category: { HEALTH: "HEALTH" }, collection: { TOP_FREE: "TOP_FREE" }, sort: { NEWEST: 2 }, reviews: async options => { calls.push(options); return { data: [{ id: "x", score: 3, text: "Review" }], nextPaginationToken: "next" }; } });
-    expect(await google.reviews("com.sleep.app", locale, "previous", signal())).toMatchObject({ nextCursor: "next", exhausted: false });
+    expect(await google.reviews("com.sleep.app", locale, "previous", signal())).toMatchObject({ nextCursor: "next", exhausted: false, reviews: [{ reviewId: "x", identityVerified: true, identityReason: "validated_scope" }] });
     expect(calls.at(-1)).toMatchObject({ paginate: true, nextPaginationToken: "previous", num: 100, sort: 2 });
   });
 });

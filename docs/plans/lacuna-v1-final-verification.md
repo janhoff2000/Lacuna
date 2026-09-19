@@ -131,3 +131,13 @@ through rendered component contracts, not a full manual browser matrix.
 | `bun run typecheck` | Exit 0. |
 | `bun run lint` | Exit 0. |
 | `bun run build` | Exit 0. |
+
+## Review-ID assumption update (2026-09-14)
+
+Two immediate bounded, no-AI trial runs returned the same six apps and all 840
+review IDs with no changed review payloads or store-request errors. The user chose
+to treat non-empty Apple and Google review IDs as stable for normal research. The
+real adapters now mark those IDs trusted, allowing counts, AI selection, and
+cross-run reuse. This is an explicit assumption rather than proof of long-term or
+cross-sort stability. Existing conflict detection still quarantines an ID whenever
+the same store/app/ID later has different content.

@@ -94,10 +94,12 @@ export function activateNextRun(db: DB, now = Date.now()): RunRow | null {
     return getRun(db, next.id);
   });
 }
-export function claimTask(db: DB, runId: string, now = Date.now()): TaskRow | null {
+export function claimTask(db: DB, runId: string, now = Date.now(), maxConcurrent = 1): TaskRow | null {
   return transaction(db, () => {
     const run = getRun(db, runId);
-    if (run.status !== "running" || db.query("SELECT id FROM tasks WHERE status='running' LIMIT 1").get()) return null;
+    if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 1) throw new Error("Invalid task concurrency");
+    const { running } = db.query<{ running: number }, []>("SELECT COUNT(*) AS running FROM tasks WHERE status='running'").get()!;
+    if (run.status !== "running" || running >= maxConcurrent) return null;
     const task = db.query<TaskRow, [string, string, number]>("SELECT * FROM tasks WHERE run_id=? AND stage=? AND status IN ('pending','retry') AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY updated_at,created_at,json_extract(checkpoint_json,'$.appIndex'),json_extract(checkpoint_json,'$.streamIndex'),id LIMIT 1").get(runId, run.stage, now);
     if (!task) return null;
     db.query("UPDATE tasks SET status='running',attempt_id=?,attempt_count=attempt_count+1,retry_count=retry_count+1,next_retry_at=NULL,updated_at=? WHERE id=?").run(randomUUID(), now, task.id);

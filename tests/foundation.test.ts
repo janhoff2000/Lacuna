@@ -22,9 +22,9 @@ describe("database and JSON", () => {
     expect(db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     expect(db.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(db.query("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
-    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
     expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name)).toEqual(["ai_requests", "analyses", "opportunities", "run_sources", "runs", "saved_opportunities", "settings", "sources", "tasks"]);
-    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 2 }); second.close();
+    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 4 }); second.close();
     expect(() => createTask(db, "missing", "collection", "key")).toThrow();
   });
   test("transaction rollback, async refusal and runtime JSON validation", () => {
@@ -145,11 +145,13 @@ describe("runs and durable tasks", () => {
 });
 
 describe("AI budget ledger without live API calls", () => {
-  test("reserve worst-case before dispatch, global sequential exclusion and exact pricing", () => {
+  test("reserve worst-case before dispatch, permits bounded parallel work and records exact pricing", () => {
     const { taskId, task, runId } = running(); const request = reservation(taskId, task.attempt_id!);
     expect(request.reservedUsd).toBe(0.0014);
-    expect(reserveAi(db, taskId, task.attempt_id!, { maxInputTokens: 1, maxOutputTokens: 1 })).toEqual({ refused: "in_flight" });
-    expect(budgetState(db, runId).remainingUsd).toBeCloseTo(0.9986);
+    const parallelId = createTask(db, runId, "discovery", "parallel"); const parallel = claimTask(db, runId, Date.now(), 2)!;
+    expect(parallel.id).toBe(parallelId);
+    expect(reserveAi(db, parallelId, parallel.attempt_id!, { maxInputTokens: 1, maxOutputTokens: 1 })).toMatchObject({ reservedUsd: 0.0000014 });
+    expect(budgetState(db, runId).remainingUsd).toBeCloseTo(0.9985986);
     finalizeAi(db, request.id, { inputTokens: 500, outputTokens: 100 }, null, "provider-id");
     expect(getAiRequest(db, request.id).estimated_usd).toBe(0.00022);
     expect(getAiRequest(db, request.id).known_charge_usd).toBeNull();

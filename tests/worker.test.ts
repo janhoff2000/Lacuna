@@ -59,3 +59,14 @@ test("worker runs fake stages sequentially and exits cleanly", async () => {
   expect(maxInFlight).toBe(1); expect(workerStatus(db)).toBe("not_running");
   const next = acquireWorkerLock(path); next.release();
 });
+test("worker runs up to one hundred independent analysis tasks concurrently", async () => {
+  const runId = createRun(db, {}, settings); const shutdown = new AbortController();
+  let inFlight = 0; let maxInFlight = 0;
+  const handlers: Handlers = Object.fromEntries(STAGES.map(stage => [stage, async () => {
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await Bun.sleep(20); inFlight--; return { stage };
+  }]));
+  const planner = (_run: unknown, stage: string) => stage === "analysis" ? Array.from({ length: 100 }, (_, index) => ({ key: `review-${index}` })) : [{ key: stage }];
+  const worker = runWorker({ path, signal: shutdown.signal, handlers, planner, concurrency: 100 });
+  await until(() => getRun(db, runId).status === "completed"); shutdown.abort(); await worker;
+  expect(maxInFlight).toBe(100);
+});
