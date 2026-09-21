@@ -226,6 +226,8 @@ export function ActionFeedback({ result }: { result?: ActionResult }) {
     <p className="action-success" role="status">
       {result.intent === "save"
         ? "Opportunity saved. Find it in Saved opportunities."
+        : result.intent === "unsave"
+          ? "Opportunity removed from Saved opportunities."
         : result.intent === "settings"
           ? "Settings saved."
           : result.intent === "update_saved"

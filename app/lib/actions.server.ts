@@ -274,6 +274,8 @@ export async function workspaceAction(
       };
     else if (intent === "save")
       payload = { opportunityId: String(values.opportunityId ?? "") };
+    else if (intent === "unsave")
+      payload = { opportunityId: String(values.opportunityId ?? "") };
     else if (intent === "update_saved") {
       if (!(String(values.status) in STATUS_LABELS))
         throw new FormError({ status: "Choose a saved opportunity status." });

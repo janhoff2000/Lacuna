@@ -76,6 +76,7 @@ export const action = ({ request, params }: ActionFunctionArgs) =>
       "remove_candidate",
       "add_candidate",
       "save",
+      "unsave",
       "refresh",
     ],
     params.runId,

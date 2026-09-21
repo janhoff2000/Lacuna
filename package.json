@@ -16,6 +16,7 @@
     "trial": "bun scripts/scraper-trial.ts"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "@react-router/node": "latest",
     "@react-router/serve": "latest",
     "app-store-scraper": "latest",

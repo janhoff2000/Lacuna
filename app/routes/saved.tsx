@@ -120,9 +120,6 @@ export default function Saved() {
                     />
                   </label>
                   <div className="notes-footer">
-                    <p className="field-hint">
-                      Refreshes never replace these notes or change your status.
-                    </p>
                     <Submit secondary>Save notes and status</Submit>
                   </div>
                 </Form>

@@ -66,14 +66,11 @@ export default function Settings() {
         <fetcher.Form
           ref={form}
           method="post"
-          className="research-form"
+          className="research-form settings-form"
           noValidate
           onChange={scheduleSave}
         >
           <input type="hidden" name="intent" value="settings" />
-          <p className="autosave-status" aria-live="polite">
-            {fetcher.state !== "idle" ? "Saving changes…" : result?.ok ? "Changes saved" : "Changes save automatically"}
-          </p>
           <section className="form-section">
             <h2>Appearance</h2>
             <SelectMenu
@@ -90,11 +87,23 @@ export default function Settings() {
                 { value: "light", label: "Light" },
                 { value: "dark", label: "Dark" },
               ]}
+              onValueChange={(appearance) => {
+                const systemPrefersDark = matchMedia(
+                  "(prefers-color-scheme: dark)",
+                ).matches;
+                document.documentElement.dataset.theme =
+                  appearance === "system"
+                    ? systemPrefersDark
+                      ? "dark"
+                      : "light"
+                    : appearance;
+                scheduleSave();
+              }}
               {...fieldA11y("appearance", result)}
             />
             <FieldError name="appearance" result={result} />
             <p className="field-hint">
-              System follows your device. Your choice is applied when you save.
+              System follows your device. Changes apply immediately.
             </p>
           </section>
           <section className="form-section">

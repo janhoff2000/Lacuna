@@ -150,6 +150,9 @@ export function saveOpportunity(db: DB, opportunityId: string): string {
   db.query("INSERT INTO saved_opportunities(id,opportunity_id,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(opportunity_id) DO NOTHING").run(id, opportunityId, now, now);
   return db.query<{ id: string }, [string]>("SELECT id FROM saved_opportunities WHERE opportunity_id=?").get(opportunityId)!.id;
 }
+export function unsaveOpportunity(db: DB, opportunityId: string): void {
+  db.query("DELETE FROM saved_opportunities WHERE opportunity_id=?").run(opportunityId);
+}
 export function updateSaved(db: DB, id: string, status: string, notes: string): void {
   const parsedStatus = z.enum(SAVED_STATUSES).parse(status); z.string().max(20_000).parse(notes);
   const result = db.query("UPDATE saved_opportunities SET status=?,notes=?,updated_at=? WHERE id=?").run(parsedStatus, notes, Date.now(), id);
@@ -172,6 +175,7 @@ export async function researchAction(db: DB, request: Request, value: unknown): 
     case "add_candidate": await addCandidate(db, runId, z.string().parse(payload.url), request.signal); break;
     case "settings": updateSettings(db, payload); break;
     case "save": return { savedId: saveOpportunity(db, z.string().parse(payload.opportunityId)) };
+    case "unsave": unsaveOpportunity(db, z.string().parse(payload.opportunityId)); break;
     case "update_saved": updateSaved(db, z.string().parse(payload.id), z.string().parse(payload.status), z.string().parse(payload.notes)); break;
     case "refresh": return { runId: refreshResearch(db, runId) };
     default: throw new Error("Unknown action");

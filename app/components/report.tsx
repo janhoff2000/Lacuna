@@ -1,4 +1,11 @@
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
+import { AndroidLogoIcon, AppleLogoIcon } from "@phosphor-icons/react/ssr";
 import { Form, Link } from "react-router";
 import { languageMatchesAny, type JsonObject } from "../../shared/types";
 import type { readResearch } from "../../server/operations";
@@ -20,6 +27,31 @@ import { BookmarkIcon, EmptyState, Notice, Submit } from "./workspace";
 
 export type ResearchView = ReturnType<typeof readResearch>;
 export type SourceView = ResearchView["sources"][number];
+const OPPORTUNITY_TABS = [
+  { id: "assessment", label: "Assessment" },
+  { id: "evidence", label: "Evidence" },
+  { id: "comparison", label: "Competitors" },
+  { id: "apps-coverage", label: "Apps and coverage" },
+] as const;
+type OpportunityTab = (typeof OPPORTUNITY_TABS)[number]["id"];
+function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
+  const id = useId();
+  return (
+    <span className="info-tip">
+      <button
+        type="button"
+        className="info-tip-trigger"
+        aria-label={`About ${label}`}
+        aria-describedby={id}
+      >
+        i
+      </button>
+      <span id={id} className="info-tooltip" role="tooltip">
+        {children}
+      </span>
+    </span>
+  );
+}
 function storedObject(encoded?: string): JsonObject {
   if (!encoded) return {};
   try {
@@ -46,6 +78,28 @@ function languageLabel(language: string): string {
   } catch {
     return language.toUpperCase();
   }
+}
+function coverageGapLabel(reason: string, count: number): string {
+  if (reason === "Not verified: listing has no official website")
+    return `${count} app ${count === 1 ? "listing has" : "listings have"} no official website to verify.`;
+  if (reason === "five_page_limit")
+    return "An official website check stopped at the five-page safety limit.";
+  if (
+    reason ===
+    "Only the 30 batch themes with most distinct source support entered bounded opportunity synthesis; all batch themes remain linked in checkpoints"
+  )
+    return "Opportunity synthesis used the 30 themes with the strongest source support; lower-support themes were not turned into opportunities.";
+  if (reason === "Metadata limit prevented complete counterpart/alternative checks")
+    return "The research limit prevented some competitor and alternative checks.";
+  if (reason === "Competitor claims could not be validated")
+    return "Some competitor claims could not be validated.";
+  if (
+    reason ===
+    "Report prose synthesis failed; validated evidence and code-computed assessment retained"
+  )
+    return "The final prose summary could not be generated; the evidence-backed opportunities and assessments are still available.";
+  const readable = reason.replaceAll("_", " ");
+  return `${readable.charAt(0).toUpperCase()}${readable.slice(1)}${count > 1 ? ` (${count} occurrences)` : ""}`;
 }
 function RatingStars({ rating }: { rating: number }) {
   const filled = Math.max(0, Math.min(5, Math.round(rating)));
@@ -128,6 +182,38 @@ function ConfidenceSignal({ confidence }: { confidence: string }) {
     </span>
   );
 }
+function DirectionSignal({ direction }: { direction: string }) {
+  if (!direction) return null;
+  const android = <AndroidLogoIcon aria-hidden="true" size={14} weight="regular" />;
+  const ios = <AppleLogoIcon aria-hidden="true" size={14} weight="regular" />;
+  if (direction === "android_to_ios")
+    return (
+      <span className="direction-signal" title="Android to iOS">
+        {android}
+        <span>Android</span>
+        <span>→</span>
+        {ios}
+        <span>iOS</span>
+      </span>
+    );
+  if (direction === "ios_to_android")
+    return (
+      <span className="direction-signal" title="iOS to Android">
+        {ios}
+        <span>iOS</span>
+        <span>→</span>
+        {android}
+        <span>Android</span>
+      </span>
+    );
+  return (
+    <span className="direction-signal" title="Both directions">
+      {android}
+      {ios}
+      <span>Both directions</span>
+    </span>
+  );
+}
 export function OpportunityRow({
   opportunity,
   active,
@@ -154,7 +240,6 @@ export function OpportunityRow({
         )}
       </div>
       <h3>{str(opportunity.title, "Untitled opportunity")}</h3>
-      <p>{str(opportunity.need)}</p>
       <div className="row-labels">
         <PrioritySignal priority={num(opportunity.priority)} />
         <ConfidenceSignal
@@ -167,7 +252,7 @@ export function OpportunityRow({
             ? `${num(count)} supporting reviews`
             : "Preliminary evidence"}
         </span>
-        <span>{directionLabel(opportunity.direction)}</span>
+        <DirectionSignal direction={str(opportunity.direction)} />
       </div>
     </Link>
   );
@@ -301,9 +386,10 @@ function EvidencePassage({
           </div>
         )}
         {uncertainties.size > 0 && (
-          <p className="metadata">
-            Uncertainty: {[...uncertainties].join(" ")}
-          </p>
+          <aside className="evidence-uncertainty" aria-label="Uncertainty">
+            <span>Uncertainty</span>
+            <p>{[...uncertainties].join(" ")}</p>
+          </aside>
         )}
       </div>
     </article>
@@ -328,8 +414,13 @@ export function OpportunityDetail({
   sample?: boolean;
   spokenLanguages?: string[];
 }) {
+  const [activeTab, setActiveTab] = useState<OpportunityTab>(() =>
+    selectedSource ? "evidence" : "assessment",
+  );
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const verification = obj(opportunity.verification);
   const counts = obj(opportunity.counts);
+  const confidence = str(opportunity.confidence, "Unassessed");
   const supportIds = strings(opportunity.sourceIds);
   const counterIds = strings(opportunity.counterSourceIds);
   const citations = objects(verification.citations);
@@ -348,14 +439,33 @@ export function OpportunityDetail({
   const passages = sources.filter((source) => allIds.includes(source.id));
   const findings = [...objects(opportunity.evidence), ...citations, ...pricing];
   useEffect(() => {
+    setActiveTab(selectedSource ? "evidence" : "assessment");
+  }, [opportunity.id, selectedSource]);
+  useEffect(() => {
     if (!selectedSource) return;
+    if (activeTab !== "evidence") return;
     const frame = requestAnimationFrame(() =>
       document
         .getElementById(sourceAnchor(selectedSource))
         ?.scrollIntoView({ block: "start" }),
     );
     return () => cancelAnimationFrame(frame);
-  }, [selectedSource, opportunity.id]);
+  }, [activeTab, selectedSource, opportunity.id]);
+  const selectTab = (tab: OpportunityTab) => setActiveTab(tab);
+  const moveTabFocus = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight")
+      nextIndex = (index + 1) % OPPORTUNITY_TABS.length;
+    else if (event.key === "ArrowLeft")
+      nextIndex = (index - 1 + OPPORTUNITY_TABS.length) % OPPORTUNITY_TABS.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = OPPORTUNITY_TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = OPPORTUNITY_TABS[nextIndex];
+    selectTab(next.id);
+    tabRefs.current[nextIndex]?.focus();
+  };
   return (
     <article className="opportunity-detail">
       <Link className="back-to-list" to={base}>
@@ -381,8 +491,9 @@ export function OpportunityDetail({
             <Submit
               secondary
               name="intent"
-              value="save"
-              disabled={!saveEnabled || saved}
+              value={saved ? "unsave" : "save"}
+              disabled={!saved && !saveEnabled}
+              aria-label={saved ? "Remove from saved opportunities" : "Save opportunity"}
             >
               <BookmarkIcon filled={saved} />
               {saved ? "Saved" : "Save opportunity"}
@@ -404,25 +515,53 @@ export function OpportunityDetail({
         </dt>
         <dd>{str(opportunity.audience, "No specific audience established")}</dd>
       </dl>
-      <p className="field-hint">
-        This opportunity is an interpretation of observed statements. A product
-        proposal is not proof of demand.
-      </p>
-      <nav className="detail-nav" aria-label="Opportunity sections">
-        <a href="#assessment">Assessment</a>
-        <a href="#evidence">Evidence</a>
-        <a href="#comparison">Competitors</a>
-        <a href="#apps-coverage">Apps and coverage</a>
+      <nav className="detail-nav" aria-label="Opportunity sections" role="tablist">
+        {OPPORTUNITY_TABS.map((tab, index) => (
+          <button
+            key={tab.id}
+            ref={(element) => {
+              tabRefs.current[index] = element;
+            }}
+            id={`opportunity-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`opportunity-panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => selectTab(tab.id)}
+            onKeyDown={(event) => moveTabFocus(event, index)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </nav>
-      <section id="assessment" className="detail-section">
-        <h3>Priority and evidence confidence</h3>
+      <section
+        id="opportunity-panel-assessment"
+        className="detail-section"
+        role="tabpanel"
+        aria-labelledby="opportunity-tab-assessment"
+        hidden={activeTab !== "assessment"}
+      >
+        <h3 className="info-heading">
+          How strong is this opportunity?
+          <InfoTip label="the opportunity assessment">
+            Priority suggests what to investigate first. Evidence confidence
+            describes how strongly the collected reviews and verification checks
+            support this opportunity.
+          </InfoTip>
+        </h3>
         <div className="assessment-grid">
           <div>
             <p className="assessment-label">
               {{ 1: "High", 2: "Medium", 3: "Low" }[
                 num(opportunity.priority)
               ] ?? "Unassessed"}{" "}
-              priority
+              investigation priority
+              <InfoTip label="investigation priority">
+                This orders opportunities for further research. High requires
+                strong evidence confidence and severe reported impact; conflicting
+                evidence lowers the priority.
+              </InfoTip>
             </p>
             <ul className="plain-list">
               {strings(opportunity.priorityReasons).map((reason) => (
@@ -432,7 +571,12 @@ export function OpportunityDetail({
           </div>
           <div>
             <p className="assessment-label">
-              {str(opportunity.confidence, "Unassessed")} confidence
+              {confidence.charAt(0).toUpperCase() + confidence.slice(1)} confidence
+              <InfoTip label="evidence confidence">
+                This measures the strength of the evidence using distinct and
+                recent reviews, represented products and developers, valid source
+                links, and completed verification checks.
+              </InfoTip>
             </p>
             <dl className="compact-facts">
               {[
@@ -449,11 +593,17 @@ export function OpportunityDetail({
             </dl>
           </div>
         </div>
-        <p className="metadata">
-          Verification: {str(opportunity.status, "Preliminary")}.{" "}
-          {num(opportunity.denominator)} successfully analyzed reviews in the
-          denominator. Priority helps order investigation; it does not predict
-          business success.
+        <p className="metadata assessment-basis">
+          {num(counts.supportingReviews).toLocaleString("en")} source-linked{" "}
+          {num(counts.supportingReviews) === 1 ? "review supports" : "reviews support"}{" "}
+          this opportunity · {num(opportunity.denominator).toLocaleString("en")} reviews
+          analyzed overall · Verification: {str(opportunity.status, "Preliminary")}
+          <InfoTip label="verification status">
+            A supporting review is a captured source directly linked to this
+            opportunity. Verification also checks whether citations and competitor
+            claims could be confirmed. A partial result means at least one required
+            check or source was unavailable.
+          </InfoTip>
         </p>
         {strings(opportunity.uncertainty).length > 0 && (
           <Notice title="What remains uncertain">
@@ -465,7 +615,13 @@ export function OpportunityDetail({
           </Notice>
         )}
       </section>
-      <section id="evidence" className="detail-section">
+      <section
+        id="opportunity-panel-evidence"
+        className="detail-section"
+        role="tabpanel"
+        aria-labelledby="opportunity-tab-evidence"
+        hidden={activeTab !== "evidence"}
+      >
         <div className="section-heading">
           <h3>Evidence and counterevidence</h3>
           <span className="metadata">
@@ -512,7 +668,13 @@ export function OpportunityDetail({
           </Notice>
         )}
       </section>
-      <section id="comparison" className="detail-section">
+      <section
+        id="opportunity-panel-comparison"
+        className="detail-section"
+        role="tabpanel"
+        aria-labelledby="opportunity-tab-comparison"
+        hidden={activeTab !== "comparison"}
+      >
         <h3>Competitor verification</h3>
         <p className="report-prose">
           {str(
@@ -655,7 +817,13 @@ export function OpportunityDetail({
           </div>
         ))}
       </section>
-      <section id="apps-coverage" className="detail-section">
+      <section
+        id="opportunity-panel-apps-coverage"
+        className="detail-section"
+        role="tabpanel"
+        aria-labelledby="opportunity-tab-apps-coverage"
+        hidden={activeTab !== "apps-coverage"}
+      >
         <h3>Apps and coverage</h3>
         {sources
           .filter(
@@ -793,6 +961,9 @@ export function CoverageDetails({ view }: { view: ResearchView }) {
   const gaps = Array.isArray(view.run.coverageDetails.gaps)
     ? objects(view.run.coverageDetails.gaps)
     : [];
+  const requestedCountries = strings(view.run.settings.countries);
+  const requestedStores = strings(view.run.settings.stores);
+  const reportCounts = obj(view.report?.counts);
   const errors = view.tasks.filter((task) => task.error_code);
   const streams = view.tasks
     .filter((task) => task.kind === "review_stream")
@@ -816,72 +987,124 @@ export function CoverageDetails({ view }: { view: ResearchView }) {
         country: str(checkpoint.country, "Unknown"),
         language: str(checkpoint.language, "Unknown"),
         state,
+        represented: snapshots > 0,
       };
     });
+  const representedCountries = new Set(
+    streams.filter((stream) => stream.represented).map((stream) => stream.country),
+  );
+  const collectedReviews = view.sources.filter(
+    (source) => source.kind === "review",
+  ).length;
+  const collectedCount = num(reportCounts.collected) || collectedReviews;
+  const analyzedCount = num(reportCounts.analyzed);
+  const outsideAnalysisCount = Math.max(0, collectedCount - analyzedCount);
+  const gapCounts = gaps.reduce((counts, gap) => {
+    const reason = str(gap.reason, "A requested source was unavailable.");
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+  const summarizedGaps = [...gapCounts.entries()];
+  const issueCount = summarizedGaps.length + errors.length;
+  const limitations = strings(view.report?.limitations);
   return (
     <details className="coverage-details">
       <summary>
-        Research coverage
-        {view.run.coverage === "gaps"
-          ? " · Gaps recorded"
-          : " · Scope and source counts"}
+        Research coverage · {representedCountries.size} of{" "}
+        {requestedCountries.length} markets represented
+        {issueCount
+          ? ` · ${issueCount} ${issueCount === 1 ? "caveat" : "caveats"}`
+          : ""}
       </summary>
       <div className="coverage-body">
-        <p className="muted">
-          {str(
-            view.report?.summary,
-            "Results will appear as completed research stages are saved.",
-          )}
+        <p className="coverage-explanation">
+          {issueCount
+            ? "Some requested evidence was unavailable. The report excludes it from its conclusions."
+            : "The requested markets and stores are represented in the evidence used by this report."}
         </p>
-        <p>
-          Countries: {strings(view.run.settings.countries).join(", ")} ·{" "}
-          {strings(view.run.settings.stores).map(storeLabel).join(" and ")}
-        </p>
-        <p>
-          App listing maximum: {num(view.run.settings.appLimit)} · Review
-          selection maximum: {num(view.run.settings.reviewLimit)}
-        </p>
-        <div className="coverage-streams">
-          <p>Requested collection language streams:</p>
-          {streams.length ? (
+        <dl className="coverage-metrics">
+          <div>
+            <dt>Markets with reviews</dt>
+            <dd>
+              {representedCountries.size} <span>of {requestedCountries.length}</span>
+            </dd>
+          </div>
+          <div>
+            <dt>Outside analysis sample</dt>
+            <dd>{outsideAnalysisCount}</dd>
+          </div>
+          <div>
+            <dt>Reviews collected</dt>
+            <dd>{collectedCount}</dd>
+          </div>
+          <div>
+            <dt>Successfully analyzed</dt>
+            <dd>{analyzedCount}</dd>
+          </div>
+        </dl>
+        {issueCount > 0 && (
+          <section className="coverage-issues" aria-labelledby="coverage-issues-title">
+            <h3 id="coverage-issues-title">What is missing</h3>
             <ul>
-              {streams.map((stream) => (
-                <li key={stream.id}>
-                  {stream.store} · requested storefront {stream.country} · requested language {stream.language} · {stream.state}
+              {summarizedGaps.map(([reason, count]) => (
+                <li key={reason}>
+                  {coverageGapLabel(reason, count)}
+                </li>
+              ))}
+              {errors.map((task) => (
+                <li key={task.id}>
+                  {stageLabelForTask(task.stage)}:{" "}
+                  {task.error_code === "configuration"
+                    ? "OpenAI configuration was missing, so this step could not run."
+                    : "This step did not complete, and its unavailable evidence was excluded."}
                 </li>
               ))}
             </ul>
-          ) : (
-            <p className="muted">Collection stream details were not recorded.</p>
-          )}
-        </div>
-        {gaps.map((gap, index) => (
-          <p key={index}>
-            {str(gap.reason, "A requested source was unavailable.")}
-          </p>
-        ))}
+          </section>
+        )}
         {!gaps.length && view.run.coverage === "gaps" && (
-          <p>
+          <p className="coverage-warning">
             Some requested sources or verification checks were incomplete.
             Review the individual source and comparison states.
           </p>
         )}
-        {errors.map((task) => (
-          <p key={task.id}>
-            {stageLabelForTask(task.stage)}:{" "}
-            {task.error_code === "configuration"
-              ? "OpenAI configuration is missing. View Settings, configure the worker, and resume."
-              : "A step could not complete. Its unavailable evidence is excluded from conclusions."}
+        {limitations.length > 0 && (
+          <section className="coverage-limitations">
+            <h3>Limits to this report</h3>
+            <ul>
+              {limitations.map((limitation, index) => (
+                <li key={index}>{limitation}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <details className="coverage-technical">
+          <summary>Collection details ({streams.length} app-market sources)</summary>
+          <p>
+            Requested markets: {requestedCountries.join(", ")} · Stores:{" "}
+            {requestedStores.map(storeLabel).join(" and ")}
           </p>
-        ))}
-        {strings(view.report?.limitations).map((limitation, index) => (
-          <p key={index}>{limitation}</p>
-        ))}
-        <p className="field-hint">
-          Review identity is still unvalidated for the real store adapters.
-          Collected reviews with uncertain identities are preserved but excluded
-          from numeric support and AI selection.
-        </p>
+          <p>
+            App listing maximum: {num(view.run.settings.appLimit)} · Review
+            selection maximum: {num(view.run.settings.reviewLimit)}
+          </p>
+          {streams.length ? (
+            <ul>
+              {streams.map((stream) => (
+                <li key={stream.id}>
+                  {stream.store} · {stream.country} · {stream.language} · {stream.state}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">Collection details were not recorded.</p>
+          )}
+          <p className="field-hint">
+            Review identity is still unvalidated for the real store adapters.
+            Collected reviews with uncertain identities are preserved but excluded
+            from numeric support and AI selection.
+          </p>
+        </details>
       </div>
     </details>
   );

@@ -325,6 +325,13 @@ describe("workspace forms use real operations", () => {
     expect(html).toContain("Investigating");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain(`opportunity=sample-opportunity`);
+    await workspaceAction(
+      request({ intent: "unsave", opportunityId: "sample-opportunity" }),
+      ["unsave"],
+      runId,
+      db,
+    );
+    expect(listSaved(db)).toHaveLength(0);
   });
 });
 describe("rendered workspace state contracts", () => {
@@ -399,6 +406,9 @@ describe("rendered workspace state contracts", () => {
       />,
     );
     expect(html).toContain(`id="${sourceAnchor("sample-review-1")}"`);
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('id="opportunity-tab-evidence" type="button" role="tab" aria-selected="true"');
+    expect(html).toContain('id="opportunity-panel-assessment" class="detail-section" role="tabpanel" aria-labelledby="opportunity-tab-assessment" hidden=""');
     expect(html).not.toContain("source-selected");
     expect(html).not.toContain("Selected source");
     expect(html).toContain('aria-current="true"');
@@ -460,6 +470,14 @@ describe("rendered workspace state contracts", () => {
     expect(unsaved).toContain("Save opportunity");
     expect(unsaved).toContain('class="bookmark-icon "');
     expect(unsaved).toContain('fill="none"');
+    expect(unsaved).toContain("How strong is this opportunity?");
+    expect(unsaved).toContain("About investigation priority");
+    expect(unsaved).toContain("About evidence confidence");
+    expect(unsaved).toContain("2 source-linked");
+    expect(unsaved).toContain("reviews support");
+    expect(unsaved).toContain("8 reviews");
+    expect(unsaved).toContain("analyzed overall");
+    expect(unsaved).not.toContain("A product proposal is not proof of demand.");
 
     const saved = render(
       <OpportunityDetail
@@ -470,6 +488,7 @@ describe("rendered workspace state contracts", () => {
       />,
     );
     expect(saved).toContain(">Saved</button>");
+    expect(saved).toContain('value="unsave"');
     expect(saved).toContain('class="bookmark-icon filled"');
     expect(saved).toContain('fill="currentColor"');
   });
@@ -496,7 +515,7 @@ describe("rendered workspace state contracts", () => {
     );
     expect(unknown.replaceAll("<!-- -->", "")).toContain("Detected language: Unknown");
   });
-  test("coverage names requested language streams and recorded gaps without author inferences", () => {
+  test("coverage summarizes usable evidence and keeps pipeline details secondary", () => {
     const view = {
       run: {
         coverage: "gaps",
@@ -512,16 +531,20 @@ describe("rendered workspace state contracts", () => {
     } as unknown as ResearchView;
     const html = render(<CoverageDetails view={view} />);
     const visible = html.replaceAll("<!-- -->", "");
-    expect(visible).toContain("Requested collection language streams:");
-    expect(visible).toContain("requested storefront US · requested language en · represented (1 stored review snapshot)");
-    expect(visible).toContain("requested storefront DE · requested language de · not visited (request_limit)");
-    expect(html).toContain("Review collection stopped: access_failure");
+    expect(visible).toContain("1 of 2 markets represented");
+    expect(visible).toContain("Outside analysis sample");
+    expect(visible).not.toContain("Stores with reviews");
+    expect(visible).toContain("What is missing");
+    expect(visible).toContain("Collection details (2 app-market sources)");
+    expect(visible).toContain("App Store · US · en · represented (1 stored review snapshot)");
+    expect(visible).toContain("App Store · DE · de · not visited (request_limit)");
+    expect(html).toContain("Review collection stopped: access failure");
     expect(html).not.toContain("author residence");
   });
   test("skip navigation has visible focus styling", () => {
     const css = readFileSync(new URL("../app/styles/workspace.css", import.meta.url), "utf8");
     expect(css).toMatch(/\.skip-link:focus\s*\{[^}]*top:\s*12px/);
-    expect(css).toMatch(/\.main-content:focus\s*\{[^}]*outline:\s*2px solid var\(--accent\)/);
+    expect(css).toMatch(/\.main-content:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/);
     expect(css).not.toMatch(/\.main-content:focus\s*\{[^}]*outline:\s*none/);
   });
   test("review bodies keep card breathing room and claim links use the accent", () => {
