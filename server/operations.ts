@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { decodeObject, encodeJson, type JsonObject } from "../shared/types";
 import { getSetting, setSetting, transaction, type DB } from "./db";
-import { apiConfigured, budgetState, DEFAULT_MODEL, MODEL_CATALOG } from "./ai";
+import { apiConfigured, budgetState, DEFAULT_MODEL, MODEL_CATALOG, reconcileUnknownAiAtReservedMaximum } from "./ai";
 import { appleAdapter } from "./collectors/apple";
 import { googleAdapter } from "./collectors/google";
 import { parseStoreUrl, type StoreAdapter } from "./collectors/common";
@@ -45,9 +45,13 @@ export function researchProgress(db: DB, runId: string) {
   const run = getRun(db, runId); const tasks = runTasks(db, runId); const worker = workerStatus(db);
   const counts = db.query<{ collected: number; selected: number; trusted: number }, [string]>("SELECT COUNT(DISTINCT s.id) AS collected,COALESCE(SUM(rs.selected),0) AS selected,COALESCE(SUM(rs.counted),0) AS trusted FROM run_sources rs JOIN sources s ON s.id=rs.source_id WHERE rs.run_id=? AND s.kind='review'").get(runId)!;
   const analyzed = successfullyAnalyzedSourceIds(db, runId).size;
+  const findings = db.query<{ total: number }, [string]>("SELECT COALESCE(SUM(json_array_length(result_json,'$.findings')),0) AS total FROM tasks WHERE run_id=? AND stage='analysis' AND result_json IS NOT NULL").get(runId)!.total;
+  const groupingTask = tasks.find(task => task.stage === "grouping");
+  const groupingCheckpoint = groupingTask ? decodeObject(groupingTask.checkpoint_json) : {};
+  const settings = researchSettings(decodeObject(run.settings_json));
   const configuration = tasks.some(task => task.error_code === "configuration");
   const discovery = discoveryState(db, runId);
-  return { id: run.id, status: run.status, reason: run.reason, stage: run.stage, coverage: run.coverage, coverageDetails: decodeObject(run.coverage_json), counts: { ...counts, analyzed }, completedTasks: tasks.filter(t => t.status === "completed").length, totalTasks: tasks.length, candidates: discovery.selected.length ? discovery.selected : discovery.candidates, preliminary: tasks.filter(t => t.stage === "grouping").map(t => t.result_json ? decodeObject(t.result_json) : decodeObject(t.checkpoint_json)), budget: budgetState(db, runId), worker,
+  return { id: run.id, status: run.status, reason: run.reason, stage: run.stage, coverage: run.coverage, coverageDetails: decodeObject(run.coverage_json), counts: { ...counts, analyzed }, pipeline: { reviewCandidates: settings.reviewCandidates, grouping: { processed: typeof groupingCheckpoint.groupedFindings === "number" ? groupingCheckpoint.groupedFindings : groupingTask?.status === "completed" ? findings : 0, total: findings } }, completedTasks: tasks.filter(t => t.status === "completed").length, totalTasks: tasks.length, candidates: discovery.selected.length ? discovery.selected : discovery.candidates, preliminary: tasks.filter(t => t.stage === "grouping").map(t => t.result_json ? decodeObject(t.result_json) : decodeObject(t.checkpoint_json)), budget: budgetState(db, runId), worker,
     message: run.status === "queued" && worker !== "running" ? "Queued — worker not running. Start with bun run worker." : run.status === "paused" && configuration ? "Configure OPENAI_API_KEY in the local ignored .env file, then Resume." : run.status === "paused" && run.reason === "budget" ? "Paused for budget or uncertain provider cost. Inspect spending before resuming." : run.status === "paused" && run.reason === "app_review" ? "Review the selected apps, then Continue." : run.status === "completed" && run.coverage === "gaps" ? "Completed with gaps" : run.status };
 }
 export function readSettings(db: DB) {
@@ -171,6 +175,7 @@ export async function researchAction(db: DB, request: Request, value: unknown): 
     case "resume": resumeRun(db, runId); break;
     case "continue": recoverPendingCandidateAdditions(db); candidateReview(db, runId); resumeRun(db, runId, { reviewed: true }); break;
     case "raise_budget": resumeRun(db, runId, { budgetUsd: z.number().nonnegative().parse(payload.budgetUsd) }); break;
+    case "reconcile_cost": reconcileUnknownAiAtReservedMaximum(db, runId); break;
     case "remove_candidate": removeCandidate(db, runId, z.string().parse(payload.store), z.string().parse(payload.appId)); break;
     case "add_candidate": await addCandidate(db, runId, z.string().parse(payload.url), request.signal); break;
     case "settings": updateSettings(db, payload); break;

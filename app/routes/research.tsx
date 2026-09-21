@@ -73,6 +73,7 @@ export const action = ({ request, params }: ActionFunctionArgs) =>
       "resume",
       "continue",
       "raise_budget",
+      "reconcile_cost",
       "remove_candidate",
       "add_candidate",
       "save",

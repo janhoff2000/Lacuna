@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase, transaction, type DB } from "../server/db";
 import { activateNextRun, cancelRun, checkpointTask, claimTask, completeTask, createRun, createTask, failTask, getRun, getTask, heartbeat, pauseRun, recoverInterrupted, resumeRun, transitionRun, workerStatus } from "../server/runs";
-import { budgetState, finalizeAi, getAiRequest, markAiUnknown, reserveAi } from "../server/ai";
+import { budgetState, finalizeAi, getAiRequest, markAiUnknown, reconcileUnknownAiAtReservedMaximum, reserveAi } from "../server/ai";
 import { advancePipeline } from "../server/pipeline";
 import { collectionRequestCount, parseCollectionCheckpoint, replaceCollectionTask } from "../server/collections";
 import { saveSource, type SourceSnapshot } from "../server/sources";
@@ -173,6 +173,15 @@ describe("AI budget ledger without live API calls", () => {
     expect(reserveAi(db, taskId, next.attempt_id!, { maxInputTokens: 1, maxOutputTokens: 1 })).toEqual({ refused: "unknown_cost" });
     finalizeAi(db, request.id, null, 0.0009); expect(budgetState(db, runId).unknown).toBe(false);
     expect(budgetState(db, runId).knownChargeUsd).toBe(0.0009);
+  });
+  test("an uncertain response can be conservatively reconciled at its reserved maximum", () => {
+    const { taskId, task, runId } = running(); const request = reservation(taskId, task.attempt_id!);
+    markAiUnknown(db, request.id);
+    expect(getRun(db, runId)).toMatchObject({ status: "paused", reason: "budget" });
+    expect(reconcileUnknownAiAtReservedMaximum(db, runId)).toBe(1);
+    expect(getAiRequest(db, request.id)).toMatchObject({ status: "finalized", estimated_usd: request.reservedUsd });
+    expect(getRun(db, runId)).toMatchObject({ status: "queued", reason: null });
+    expect(budgetState(db, runId)).toMatchObject({ committedUsd: request.reservedUsd, unknown: false });
   });
   test("late accounting survives cancel, unknown loss pauses, charges separate from usage estimate", () => {
     const { taskId, task, runId } = running(); const request = reservation(taskId, task.attempt_id!);

@@ -544,6 +544,10 @@ export type ProgressView = {
   stage: string;
   coverage: string;
   counts: { collected: number; selected: number; analyzed: number };
+  pipeline: {
+    reviewCandidates: boolean;
+    grouping: { processed: number; total: number };
+  };
   budget: {
     committedUsd: number;
     remainingUsd: number;
@@ -552,6 +556,70 @@ export type ProgressView = {
   };
   worker: string;
 };
+
+const PIPELINE_STEPS = [
+  { stage: "discovery", label: "Discover apps" },
+  { stage: "candidate_review", label: "Review app selection" },
+  { stage: "collection", label: "Collect reviews" },
+  { stage: "analysis", label: "Analyze reviews" },
+  { stage: "grouping", label: "Form opportunities" },
+  { stage: "verification", label: "Verify opportunities" },
+  { stage: "report", label: "Build report" },
+] as const;
+
+enum PipelineStepState {
+  Complete = "complete",
+  Active = "active",
+  Attention = "attention",
+  Skipped = "skipped",
+  Upcoming = "upcoming",
+}
+
+function PipelineTimeline({ progress }: { progress: ProgressView }) {
+  const activeIndex = PIPELINE_STEPS.findIndex(step => step.stage === progress.stage);
+  const terminal = progress.status === "completed";
+  const detail = (stage: (typeof PIPELINE_STEPS)[number]["stage"]) => {
+    if (stage === "discovery") return "Finding relevant apps across the selected stores";
+    if (stage === "candidate_review") return progress.pipeline.reviewCandidates ? "Waiting for the app selection to be confirmed" : "Automatic selection enabled";
+    if (stage === "collection") return `${progress.counts.collected.toLocaleString("en")} reviews collected`;
+    if (stage === "analysis") {
+      const excluded = Math.max(0, progress.counts.selected - progress.counts.analyzed);
+      return `${progress.counts.analyzed.toLocaleString("en")} of ${progress.counts.selected.toLocaleString("en")} reviews analyzed${excluded ? ` · ${excluded.toLocaleString("en")} excluded` : ""}`;
+    }
+    if (stage === "grouping") return progress.pipeline.grouping.total ? `${progress.pipeline.grouping.processed.toLocaleString("en")} of ${progress.pipeline.grouping.total.toLocaleString("en")} findings grouped` : "Grouping findings into themes and opportunities";
+    if (stage === "verification") return "Checking opportunities against official sources";
+    return "Assembling the final evidence-backed report";
+  };
+  return (
+    <ol className="pipeline-timeline" aria-label="Research pipeline">
+      {PIPELINE_STEPS.map((step, index) => {
+        const skipped = step.stage === "candidate_review" && !progress.pipeline.reviewCandidates;
+        const complete = terminal || index < activeIndex;
+        const current = !terminal && index === activeIndex;
+        const attention = current && progress.status === "paused";
+        const processing = current && progress.status === "running";
+        const state = skipped ? PipelineStepState.Skipped : complete ? PipelineStepState.Complete : attention ? PipelineStepState.Attention : current ? PipelineStepState.Active : PipelineStepState.Upcoming;
+        const progressValue = step.stage === "grouping" && progress.pipeline.grouping.total ? Math.min(progress.pipeline.grouping.processed, progress.pipeline.grouping.total) : null;
+        const progressPercent = progressValue === null ? 0 : progressValue / progress.pipeline.grouping.total * 100;
+        return (
+          <li className={`pipeline-step ${state}${processing ? " processing" : ""}`} key={step.stage} aria-current={current ? "step" : undefined}>
+            <span className="pipeline-marker" aria-hidden="true">{complete && !skipped ? "✓" : index + 1}</span>
+            <div className="pipeline-copy">
+              <strong>{step.label}</strong>
+              <span>{detail(step.stage)}</span>
+              {current && progressValue !== null && (
+                <div className="pipeline-progress" role="progressbar" aria-label={`${step.label} progress`} aria-valuemin={0} aria-valuemax={progress.pipeline.grouping.total} aria-valuenow={progressValue}>
+                  <i className="pipeline-progress-fill" style={{ width: `${progressPercent}%` }} aria-hidden="true" />
+                </div>
+              )}
+            </div>
+            <span className="pipeline-state">{skipped ? "Skipped" : complete ? "Done" : attention ? "Needs attention" : current ? progress.status === "queued" ? "Queued" : "In progress" : "Upcoming"}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
 export function ProgressPanel({
   progress,
   ceiling,
@@ -576,6 +644,7 @@ export function ProgressPanel({
         </h2>
         <RunBadge run={progress} worker={progress.worker} />
       </div>
+      <PipelineTimeline progress={progress} />
       <dl className="metrics">
         <div>
           <dt>Reviews collected</dt>
@@ -649,8 +718,8 @@ export function ProgressPanel({
         <Notice title="Provider cost is uncertain">
           <p>
             A request has no final usage record. Its reservation is included
-            above. Paid continuation stays blocked until that cost is
-            reconciled; raising the ceiling does not resolve it.
+            above. Count the full reserved maximum to reconcile it safely and
+            continue from the last checkpoint.
           </p>
         </Notice>
       )}
@@ -684,7 +753,7 @@ export function ProgressPanel({
               </Submit>
             </Form>
           )}
-          {paused && progress.reason === "budget" && (
+          {paused && progress.reason === "budget" && !progress.budget.unknown && (
             <Form method="post" className="inline-form">
               <label htmlFor="budgetUsd">
                 New AI ceiling (USD)
@@ -706,11 +775,17 @@ export function ProgressPanel({
               <Submit
                 name="intent"
                 value="raise_budget"
-                disabled={progress.budget.unknown}
               >
                 Raise budget and resume
               </Submit>
               <FieldError name="budgetUsd" result={result} />
+            </Form>
+          )}
+          {paused && progress.reason === "budget" && progress.budget.unknown && (
+            <Form method="post">
+              <Submit name="intent" value="reconcile_cost">
+                Count reserved maximum and resume
+              </Submit>
             </Form>
           )}
           {(active || paused) && (

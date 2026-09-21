@@ -103,6 +103,20 @@ describe("fixed research pipeline with fake adapters", () => {
     expect(finding.translation).toEqual(fullTranslation);
     expect(finding.translationScope).toBe("full_review");
   });
+  test("an unnecessary translation does not discard a review in a spoken language", async () => {
+    const runId = createResearch(db, input, { ...settings, stores: ["apple"], countries: ["DE"], spokenLanguages: ["en", "de"] });
+    const transport: AiTransport = async request => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_extraction") return fakeAi(request, new AbortController().signal);
+      return { id: "extra-translation", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ originalLanguage: "de", translation: { label: "Translation", language: "en", text: "I just want to play casually." }, findings: [{ excerptIndex: 0, need: "Casual play", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", uncertainty: [] }] }) };
+    };
+    await drive(runId, deps({ aiTransport: transport }));
+    const analysis = runTasks(db, runId).filter(task => task.stage === "analysis");
+    expect(analysis.every(task => decodeObject(task.result_json!).failed !== true)).toBe(true);
+    expect(researchProgress(db, runId).counts.analyzed).toBe(analysis.length);
+    const finding = (decodeObject(analysis[0].result_json!).findings as Array<Record<string, unknown>>)[0];
+    expect(finding.translation).toBeNull();
+  });
   test("a rejected opportunity response retains source-backed theme results", async () => {
     const runId = createResearch(db, input, { ...settings, stores: ["apple"], countries: ["US"] });
     const transport: AiTransport = async request => {
@@ -120,6 +134,7 @@ describe("fixed research pipeline with fake adapters", () => {
     const runId = createResearch(db, input, settings);
     const result = await drive(runId); expect(result.status).toBe("completed"); expect(result.coverage).toBe("gaps");
     const progress = researchProgress(db, runId); expect(progress.counts.selected).toBe(6); expect(progress.counts.analyzed).toBe(6);
+    expect(progress.pipeline).toEqual({ reviewCandidates: false, grouping: { processed: 6, total: 6 } });
     expect(discoveryState(db, runId).selected).toHaveLength(2); expect(progress.message).toBe("Completed with gaps");
     const report = readResearch(db, runId); expect(report.opportunities).toHaveLength(1); expect(report.opportunities[0].confidence).toBe("medium");
     expect(report.opportunities[0].counts).toMatchObject({ supportingReviews: 6, products: 2, developers: 2 });

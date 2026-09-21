@@ -73,12 +73,29 @@ export function finalizeAi(db: DB, id: string, usage: { inputTokens: number; out
 }
 export function markAiUnknown(db: DB, id: string, now = Date.now()): void { finalizeAi(db, id, null, null, null, now); }
 
+// A lost response may still have been billed. Let the user explicitly accept
+// the full reservation as the final estimate so paid work can continue without
+// ever understating the run's committed budget.
+export function reconcileUnknownAiAtReservedMaximum(db: DB, runId: string, now = Date.now()): number {
+  return transaction(db, () => {
+    const run = getRun(db, runId);
+    if (run.status !== "paused" || run.reason !== "budget") throw new Error("Uncertain provider cost can be reconciled only while paused for budget");
+    const unknown = db.query<{ id: string }, [string]>("SELECT id FROM ai_requests WHERE run_id=? AND status='unknown'").all(runId);
+    if (!unknown.length) throw new Error("No uncertain provider cost to reconcile");
+    db.query("UPDATE ai_requests SET status='finalized',estimated_usd=reserved_usd,error_code='reconciled_reserved_max',updated_at=? WHERE run_id=? AND status='unknown'").run(now, runId);
+    if (budgetState(db, runId).committedUsd <= run.budget_usd) transitionInTransaction(db, runId, "queued", null, now);
+    return unknown.length;
+  });
+}
+
 export interface ProviderResponse { id: string; output_text: string; status?: string; _request_id?: string | null; usage?: { input_tokens: number; output_tokens: number } | null }
 export type AiTransport = (request: ResponseCreateParamsNonStreaming, signal: AbortSignal) => Promise<ProviderResponse>;
 export class AiPaused extends Error {}
 export function apiConfigured(): boolean { return !!process.env.OPENAI_API_KEY?.trim(); }
 export const responseTransport: AiTransport = async (request, signal) => {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0, timeout: 60_000 });
+  // Grouping requests can legitimately take longer than one minute. Keep the
+  // request bounded while allowing the caller's abort signal to stop it sooner.
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0, timeout: 180_000 });
   return client.responses.create(request, { signal });
 };
 export async function analyze<K extends AnalysisKind>(db: DB, task: TaskRow, kind: K, input: unknown, sources: QuoteSource[], signal: AbortSignal, options: { transport?: AiTransport; configured?: boolean; model?: string } = {}): Promise<z.infer<(typeof schemas)[K]>> {

@@ -582,6 +582,26 @@ describe("rendered workspace state contracts", () => {
     );
     expect(interrupted).toContain("Research was interrupted");
     expect(interrupted).toContain("Resume");
+    expect(interrupted).toContain("Research pipeline");
+    expect(interrupted).toContain("Analyze reviews");
+    expect(interrupted).toContain("8 of 10 reviews analyzed");
+    expect(interrupted).toContain("2 excluded");
+    const processing = render(
+      <ProgressPanel
+        progress={{
+          ...SAMPLE_PROGRESS,
+          status: "running",
+          reason: null,
+          stage: "grouping",
+          pipeline: { ...SAMPLE_PROGRESS.pipeline, grouping: { processed: 7, total: 14 } },
+        }}
+        ceiling={1}
+      />,
+    );
+    expect(processing).toContain("pipeline-step active processing");
+    expect(processing).toContain("7 of 14 findings grouped");
+    expect(processing).toContain('role="progressbar"');
+    expect(processing).toContain('aria-valuenow="7"');
     expect(interrupted).not.toContain("%");
     const budget = render(
       <ProgressPanel
@@ -594,7 +614,8 @@ describe("rendered workspace state contracts", () => {
       />,
     );
     expect(budget).toContain("Provider cost is uncertain");
-    expect(budget).toContain("disabled");
+    expect(budget).toContain("Count reserved maximum and resume");
+    expect(budget).not.toContain("Raise budget and resume");
     expect(
       render(
         <Notice title="Completed with gaps">

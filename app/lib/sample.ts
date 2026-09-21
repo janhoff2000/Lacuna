@@ -192,6 +192,10 @@ export const SAMPLE_PROGRESS: ProgressView = {
   stage: "analysis",
   coverage: "gaps",
   counts: { collected: 12, selected: 10, analyzed: 8 },
+  pipeline: {
+    reviewCandidates: false,
+    grouping: { processed: 0, total: 14 },
+  },
   budget: {
     committedUsd: 0.18,
     remainingUsd: 0.82,
