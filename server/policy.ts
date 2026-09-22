@@ -1,9 +1,9 @@
 import type { Store } from "../shared/types";
 
-export const POLICY_VERSION = "selection-v1";
+export const POLICY_VERSION = "selection-v3";
 export const PRESETS = {
-  quick: { apps: 10, reviews: 2_000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 },
-  deep: { apps: 30, reviews: 10_000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 },
+  quick: { apps: 30, exploreApps: 20, discoveryApps: 300, reviews: 2_000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 },
+  deep: { apps: 75, exploreApps: 40, discoveryApps: 750, reviews: 10_000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 },
 } as const;
 export const COUNTRY_PRESETS = {
   international: ["US", "GB", "DE", "FR", "NL", "ES"],
@@ -103,7 +103,7 @@ export function selectCandidates(candidates: readonly Candidate[], cap: number):
   return { selected, developerCapRelaxed };
 }
 
-export function metadataCandidates(candidates: readonly Candidate[], preset: keyof typeof PRESETS): Candidate[] {
+export function metadataCandidates(candidates: readonly Candidate[], preset: keyof typeof PRESETS, limit: number = PRESETS[preset].metadataLookups): Candidate[] {
   const buckets = new Map<string, Candidate[]>();
   for (const candidate of candidates) {
     const key = `${candidate.intent}:${candidate.store}:${candidate.country}`;
@@ -111,12 +111,12 @@ export function metadataCandidates(candidates: readonly Candidate[], preset: key
   }
   const ordered = [...buckets.keys()].sort(compare).map(key => buckets.get(key)!.sort((a,b) => a.rank-b.rank || compare(candidateKey(a), candidateKey(b))));
   const seen = new Set<string>(); const result: Candidate[] = [];
-  while (result.length < PRESETS[preset].metadataLookups) {
+  while (result.length < limit) {
     let progress = false;
     for (const bucket of ordered) {
       // Duplicates do not consume a bucket's turn or its metadata allowance.
       while (bucket.length && seen.has(candidateKey(bucket[0]))) bucket.shift();
-      if (!bucket.length || result.length >= PRESETS[preset].metadataLookups) continue;
+      if (!bucket.length || result.length >= limit) continue;
       const candidate = bucket.shift()!;
       seen.add(candidateKey(candidate)); result.push(candidate); progress = true;
     }

@@ -13,7 +13,7 @@ if (mode === "lock") {
   const lock = acquireWorkerLock(path); console.info("READY"); await wait(); lock.release();
 } else if (mode === "uncommitted" || mode === "committed") {
   const db = openDatabase(path); db.exec("BEGIN IMMEDIATE");
-  createRun(db, { marker: mode }, { preset: "quick", countries: ["US"], spokenLanguages: ["en"], appLimit: 1, reviewLimit: 1, reviewCandidates: false });
+  createRun(db, { marker: mode }, { preset: "quick", countries: ["US"], spokenLanguages: ["en"], discoveryLimit: 300, exploreAppLimit: 20, appLimit: 1, reviewLimit: 1, reviewCandidates: false });
   if (mode === "committed") db.exec("COMMIT"); console.info("READY"); await wait(); db.close();
 } else {
   await runWorker({ path, signal: shutdown.signal, onReady: () => console.info("READY"), handlers: {

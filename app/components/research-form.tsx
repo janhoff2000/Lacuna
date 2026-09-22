@@ -80,6 +80,12 @@ export function ResearchFields({
     value("preset", str(defaults.preset, "quick")),
   );
   const [countries, setCountries] = useState(strings(defaults.countries));
+  const [discoveryLimit, setDiscoveryLimit] = useState(
+    value("discoveryLimit", String(num(defaults.discoveryLimit) || 300)),
+  );
+  const [exploreAppLimit, setExploreAppLimit] = useState(
+    value("exploreAppLimit", String(num(defaults.exploreAppLimit) || 20)),
+  );
   const [appLimit, setAppLimit] = useState(
     value("appLimit", String(num(defaults.appLimit) || 10)),
   );
@@ -97,7 +103,9 @@ export function ResearchFields({
   );
   const setDepth = (depth: string) => {
     setPreset(depth);
-    setAppLimit(depth === "deep" ? "30" : "10");
+    setDiscoveryLimit(depth === "deep" ? "750" : "300");
+    setExploreAppLimit(depth === "deep" ? "40" : "20");
+    setAppLimit(depth === "deep" ? "75" : "30");
     setReviewLimit(depth === "deep" ? "10000" : "2000");
     setBudget(depth === "deep" ? "5" : "1");
   };
@@ -112,6 +120,7 @@ export function ResearchFields({
               {[
                 ["topic", "Topic or need"],
                 ["category", "App categories"],
+                ["explore", "Explore niches"],
               ].map(([id, label]) => (
                 <label className="radio-option" key={id}>
                   <input
@@ -131,21 +140,23 @@ export function ResearchFields({
           <label htmlFor="query">
             {mode === "topic"
               ? "Topic or user need"
-              : "Focus within these categories (optional)"}
+              : mode === "explore"
+                ? "Interests or constraints (optional)"
+                : "Focus within these categories (optional)"}
             <textarea
               id="query"
               name="query"
               rows={3}
               maxLength={2000}
               defaultValue={value("query", "")}
-              placeholder="For example, planning meals around food allergies"
+              placeholder={mode === "explore" ? "For example, tools for independent professionals — or leave empty" : "For example, planning meals around food allergies"}
               {...fieldA11y("query", result)}
             />
           </label>
           <FieldError name="query" result={result} />
-          {mode === "category" && (
+          {(mode === "category" || mode === "explore") && (
             <fieldset {...fieldA11y("categories", result)}>
-              <legend>Categories</legend>
+              <legend>{mode === "explore" ? "Areas to explore (optional)" : "Categories"}</legend>
               <div className="checkbox-grid">
                 {CATEGORIES.map((category) => (
                   <label className="check-option" key={category.label}>
@@ -163,9 +174,10 @@ export function ResearchFields({
                 ))}
               </div>
               <FieldError name="categories" result={result} />
+              {mode === "explore" && <p className="field-hint">Leave everything unchecked to sample all available categories.</p>}
             </fieldset>
           )}
-          <label htmlFor="urls">
+          {mode !== "explore" && <label htmlFor="urls">
             Include specific apps (optional)
             <textarea
               id="urls"
@@ -175,11 +187,9 @@ export function ResearchFields({
               placeholder="Paste an App Store or Google Play URL, one per line"
               {...fieldA11y("urls", result)}
             />
-          </label>
-          <FieldError name="urls" result={result} />
-          <p className="field-hint">
-            Included apps count toward the app listing maximum.
-          </p>
+          </label>}
+          {mode !== "explore" && <FieldError name="urls" result={result} />}
+          {mode !== "explore" && <p className="field-hint">Included apps count toward the reviewed-app maximum.</p>}
         </section>
       )}
       <section className="form-section">
@@ -245,8 +255,8 @@ export function ResearchFields({
           <legend>Research depth</legend>
           <div className="choice-row">
             {[
-              ["quick", "Quick", "10 apps · 2,000 reviews · $1 AI ceiling"],
-              ["deep", "Deep", "30 apps · 10,000 reviews · $5 AI ceiling"],
+              ["quick", "Quick", mode === "explore" ? "300 listings · 20 reviewed apps · 2,000 reviews" : "30 reviewed apps · 2,000 reviews · $1 AI ceiling"],
+              ["deep", "Deep", mode === "explore" ? "750 listings · 40 reviewed apps · 10,000 reviews" : "75 reviewed apps · 10,000 reviews · $5 AI ceiling"],
             ].map(([id, label, description]) => (
               <label key={id} className="depth-option">
                 <input
@@ -273,8 +283,8 @@ export function ResearchFields({
       <section className="form-section">
         <h2>Research perspectives</h2>
         <p className="muted">
-          Look for missing capabilities, underserved audiences, and poor
-          execution.
+          Compare apps with the same core job, then turn recurring gaps into
+          concrete app concepts and execution priorities.
         </p>
         <label className="check-option">
           <input
@@ -326,6 +336,8 @@ export function ResearchFields({
         open={
           !!result?.errors &&
           [
+            "discoveryLimit",
+            "exploreAppLimit",
             "appLimit",
             "reviewLimit",
             "budgetUsd",
@@ -339,8 +351,40 @@ export function ResearchFields({
         </summary>
         <div className="advanced-fields">
           <div className="field-grid">
+            <label htmlFor="discoveryLimit">
+              Explore discovery pool
+              <input
+                id="discoveryLimit"
+                name="discoveryLimit"
+                type="number"
+                min="1"
+                max="2000"
+                step="1"
+                value={discoveryLimit}
+                onChange={(event) => setDiscoveryLimit(event.target.value)}
+                {...fieldA11y("discoveryLimit", result)}
+              />
+              <small>Listing details inspected before choosing and checking a niche. Used only by Explore.</small>
+              <FieldError name="discoveryLimit" result={result} />
+            </label>
+            <label htmlFor="exploreAppLimit">
+              Explore apps reviewed maximum
+              <input
+                id="exploreAppLimit"
+                name="exploreAppLimit"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                value={exploreAppLimit}
+                onChange={(event) => setExploreAppLimit(event.target.value)}
+                {...fieldA11y("exploreAppLimit", result)}
+              />
+              <small>Closest competitors retained for review collection in Explore.</small>
+              <FieldError name="exploreAppLimit" result={result} />
+            </label>
             <label htmlFor="appLimit">
-              App listing maximum
+              Topic/category apps reviewed maximum
               <input
                 id="appLimit"
                 name="appLimit"

@@ -75,7 +75,7 @@ export default function ResearchIndex() {
             }
           >
             <p>
-              Explore a topic, a user need, or an app category.
+              Research a topic or category, or explore for a promising niche.
               <br />
               Lacuna gathers reviews and links each finding to its evidence.
             </p>

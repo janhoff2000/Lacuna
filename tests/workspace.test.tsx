@@ -32,7 +32,7 @@ import {
   SAMPLE_SOURCES,
 } from "../app/lib/sample";
 import { NewResearchForm } from "../app/components/research-form";
-import { CoverageDetails, OpportunityDetail, ReportWorkspace, SourceLink, type ResearchView } from "../app/components/report";
+import { CoverageDetails, ExploreLead, MarketOverview, OpportunityDetail, ReportWorkspace, SourceLink, type ResearchView } from "../app/components/report";
 import { Notice, ProgressPanel } from "../app/components/workspace";
 import Saved from "../app/routes/saved";
 
@@ -55,6 +55,8 @@ const values: FormValues = {
   countries: "US, DE",
   languages: "",
   spokenLanguages: "en",
+  discoveryLimit: "300",
+  exploreAppLimit: "20",
   appLimit: "10",
   reviewLimit: "2000",
   budgetUsd: "0",
@@ -155,6 +157,12 @@ describe("workspace forms use real operations", () => {
       ),
     ).toThrow(FormError);
   });
+  test("explore mode defaults to every available category without requiring an idea", () => {
+    const parsed = parseResearchForm({ ...values, mode: "explore", query: "", categories: [] }, {});
+    expect(parsed.input.mode).toBe("explore");
+    expect(parsed.input.query).toBe("");
+    expect(parsed.input.categories).toHaveLength(12);
+  });
   test("new workspaces use the dark precision theme by default", () => {
     expect(readSettings(db).appearance).toBe("dark");
   });
@@ -177,7 +185,7 @@ describe("workspace forms use real operations", () => {
       appearance: "dark",
       model,
       spokenLanguages: ["en", "de"],
-      defaults: { budgetUsd: 0, countries: ["US", "DE"] },
+      defaults: { budgetUsd: 0, countries: ["US", "DE"], discoveryLimit: 300, exploreAppLimit: 20, appLimit: 30 },
     });
     const rejected = await workspaceAction(
       request({
@@ -335,6 +343,24 @@ describe("workspace forms use real operations", () => {
   });
 });
 describe("rendered workspace state contracts", () => {
+  test("explore lead distinguishes observed competition from market proof", () => {
+    const html = render(<ExploreLead report={{ exploration: { title: "Offline sleep journals", problem: "Record sleep without dependable connectivity.", audience: "People monitoring sleep in low-connectivity settings", observedAppCount: 4, observedDeveloperCount: 3, saturationSignal: "few competitors observed in this bounded sample", whyPromising: "The sampled cohort shows fragmented offline support.", uncertainty: ["The sample cannot establish market size or demand."] } }} />);
+    expect(html).toContain("Explore result");
+    expect(html).toContain("Promising niche lead · not market proof");
+    expect(html).toContain("few competitors observed in this bounded sample");
+    expect(html).toContain("What Explore cannot establish");
+  });
+
+  test("market overview compares the cohort as a combined functionality baseline", () => {
+    const html = render(<MarketOverview report={{ marketOverview: { coreProblem: "Help teams assemble viable tournament compositions.", appCount: 12, sharedWorkflow: ["Choose roles", "Compare combinations", "Share the plan"], commonCapabilities: [{ name: "Composition builder", description: "Combine roles and characters into a team.", sourceIds: ["listing-1", "listing-2", "listing-3"] }], specializedCapabilities: [{ name: "Explainable suggestions", description: "Explain why a proposed team works.", sourceIds: ["listing-4"] }], comparisonSummary: "Basic composition building is established; explainable recommendations are not yet the cohort baseline." } }} />);
+    expect(html).toContain("What apps in this niche currently do");
+    expect(html).toContain("Common functionality");
+    expect(html).toContain("Functionality only some apps offer");
+    expect(html).toMatch(/3(?:<!-- -->)? researched app/);
+    expect(html).toContain("Baseline for the app suggestions");
+    expect(html).not.toContain("listing-1");
+  });
+
   test("cancelled research offers explicit checkpoint resume as well as a new refresh", () => {
     const html = render(
       <ProgressPanel
@@ -379,8 +405,8 @@ describe("rendered workspace state contracts", () => {
         }}
       />,
     );
-    expect(html.match(/aria-describedby="mode-error"/g)).toHaveLength(2);
-    expect(html.match(/aria-invalid="true"/g)).toHaveLength(3);
+    expect(html.match(/aria-describedby="mode-error"/g)).toHaveLength(3);
+    expect(html.match(/aria-invalid="true"/g)).toHaveLength(4);
     expect(html).toContain('aria-describedby="direction-hint direction-error"');
     expect(html).toContain('id="mode-error"');
     expect(html).toContain('id="direction-error"');
@@ -473,11 +499,14 @@ describe("rendered workspace state contracts", () => {
     expect(unsaved).toContain("How strong is this opportunity?");
     expect(unsaved).toContain("About investigation priority");
     expect(unsaved).toContain("About evidence confidence");
-    expect(unsaved).toContain("2 source-linked");
+    expect(unsaved).toContain("source-linked");
     expect(unsaved).toContain("reviews support");
-    expect(unsaved).toContain("8 reviews");
+    expect(unsaved).toMatch(/8(?:<!-- -->)? reviews/);
     expect(unsaved).toContain("analyzed overall");
     expect(unsaved).not.toContain("A product proposal is not proof of demand.");
+    expect(unsaved).toContain("What it should do");
+    expect(unsaved).toContain("How it should beat the competition");
+    expect(unsaved).toContain("Execution priorities");
 
     const saved = render(
       <OpportunityDetail

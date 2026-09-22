@@ -8,8 +8,8 @@ const evidence = (count: number): ConfidenceEvidence => ({ support: Array.from({
 
 describe("versioned policy limits and allocation", () => {
   test("exact caps, defaults, countries and freshness", () => {
-    expect(PRESETS.quick).toEqual({ apps: 10, reviews: 2000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 });
-    expect(PRESETS.deep).toEqual({ apps: 30, reviews: 10000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 });
+    expect(PRESETS.quick).toEqual({ apps: 30, exploreApps: 20, discoveryApps: 300, reviews: 2000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 });
+    expect(PRESETS.deep).toEqual({ apps: 75, exploreApps: 40, discoveryApps: 750, reviews: 10000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 });
     expect(COUNTRY_PRESETS.international).toEqual(["US", "GB", "DE", "FR", "NL", "ES"]);
     expect(COUNTRY_PRESETS.europe).toEqual(["GB", "DE", "FR", "NL", "ES"]); expect(COUNTRY_PRESETS.us).toEqual(["US"]);
     expect(FRESHNESS).toEqual({ listingMs: 86400000, collectionMs: 86400000, websiteMs: 604800000 });

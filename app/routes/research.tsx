@@ -41,7 +41,7 @@ import {
   fieldA11y,
   type ProgressView,
 } from "../components/workspace";
-import { CoverageDetails, ReportWorkspace } from "../components/report";
+import { CoverageDetails, ExploreLead, MarketOverview, ReportWorkspace } from "../components/report";
 import { startProgressPolling } from "../lib/progress";
 
 export const meta: MetaFunction = () => [{ title: "Research report · Lacuna" }];
@@ -117,6 +117,7 @@ export default function ResearchRun() {
     });
   }, [active, loaded.view.run.id, revalidator]);
   const { view } = loaded;
+  const appLimit = num(view.run.input.mode === "explore" ? view.run.settings.exploreAppLimit : view.run.settings.appLimit);
   const review =
     progress.status === "paused" && progress.reason === "app_review";
   const preliminary = view.tasks
@@ -181,13 +182,15 @@ export default function ResearchRun() {
           />
         </details>
         <CoverageDetails view={view} />
+        <ExploreLead report={view.report} />
+        <MarketOverview report={view.report} />
         {review && (
           <section className="candidate-review">
             <div className="section-heading">
               <div>
                 <h2>Review selected apps</h2>
                 <p className="muted">
-                  {view.selected.length} of {num(view.run.settings.appLimit)}{" "}
+                  {view.selected.length} of {appLimit}{" "}
                   app listings selected. Remove unrelated apps or add a specific
                   app before continuing.
                 </p>
@@ -280,16 +283,16 @@ export default function ResearchRun() {
                 name="intent"
                 value="add_candidate"
                 disabled={
-                  view.selected.length >= num(view.run.settings.appLimit)
+                  view.selected.length >= appLimit
                 }
               >
                 Add app
               </Submit>
               <FieldError name="url" result={result} />
             </Form>
-            {view.selected.length >= num(view.run.settings.appLimit) && (
+            {view.selected.length >= appLimit && (
               <p className="field-hint">
-                Your listing maximum is reached. Remove an app to make room.
+                Your reviewed-app maximum is reached. Remove an app to make room.
               </p>
             )}
           </section>

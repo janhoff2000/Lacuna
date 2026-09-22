@@ -15,9 +15,9 @@ import { findingSchema, schemas, themeSchema, validateCitations, validateStageLi
 import type { Handlers, StagePlanner } from "./pipeline";
 
 const json = (value: unknown): JsonObject => decodeObject(encodeJson(value));
-export interface CandidateRecord extends Candidate { sourceId: string; title: string; language: string; removed?: boolean }
+export interface CandidateRecord extends Candidate { sourceId: string; title: string; language: string; removed?: boolean; cohortFit?: "core" | "adjacent" | "unrelated"; coreFunctionality?: string }
 interface Seed extends Locale { store: Store; appId: string; rank: number; intent: string; origins: string[]; included: boolean }
-interface DiscoveryState { seeds: Seed[]; candidates: CandidateRecord[]; selected: CandidateRecord[]; completed: string[]; lookups: number; developerCapRelaxed: boolean; additions?: { key: string; reservationId: string; processInstanceId?: string }[]; requests?: { key: string; store: Store; country: string; language: string; intent: string; ids: string[]; request: JsonObject }[] }
+interface DiscoveryState { seeds: Seed[]; candidates: CandidateRecord[]; selected: CandidateRecord[]; completed: string[]; lookups: number; developerCapRelaxed: boolean; exploration?: JsonObject; additions?: { key: string; reservationId: string; processInstanceId?: string }[]; requests?: { key: string; store: Store; country: string; language: string; intent: string; ids: string[]; request: JsonObject }[] }
 export interface SourceRow { id: string; store: Store | null; app_id: string | null; review_id: string | null; kind: string; url: string; payload_json: string; captured_at: number; logical_review_key?: string | null; provenance_json?: string; task_id?: string }
 export interface ResearchDependencies { apple?: StoreAdapter; google?: StoreAdapter; website?: typeof collectWebsite; aiTransport?: AiTransport; aiConfigured?: boolean; now?: () => number }
 
@@ -88,9 +88,12 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     const run = getRun(db, task.run_id); const settings = researchSettings(decodeObject(run.settings_json)); const input = researchInputSchema.parse(decodeObject(run.input_json));
     const state = discoveryState(db, run.id); const intents = searchIntents(input, settings.preset);
     const enabled = settings.stores as Store[]; const locales = settings.countries.map(country => planLocales("apple", [country])[0]);
+    const metadataLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+    const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
+    const broadLimit = input.mode === "explore" ? Math.max(2, Math.floor(metadataLimit * 0.6)) : metadataLimit;
     const save = (write?: () => void) => checkpointTask(db, task.id, task.attempt_id!, json(state), write, now());
     for (const url of input.urls) { const reference = parseStoreUrl(url); addSeed(state, { ...reference, country: reference.country ?? settings.countries[0], language: "en", rank: -1, intent: input.query || "Explicit inclusion", included: true, origins: [`included:${url}`] }); }
-    if (state.seeds.filter(seed => seed.included).length > settings.appLimit) throw new Error("Explicit inclusions exceed listing cap");
+    if (state.seeds.filter(seed => seed.included).length > appLimit) throw new Error("Explicit inclusions exceed listing cap");
     const requests: { key: string; store: Store; locale: Locale; intent: string; category?: string }[] = [];
     // Stable round-robin over intents, country and store before metadata truncation.
     for (let index = 0; index < Math.max(intents.length, input.categories.length); index++) for (const locale of locales) for (const store of enabled) {
@@ -105,15 +108,15 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
         (state.requests ??= []).push({ key: request.key, store: request.store, ...request.locale, intent: request.intent, ids: bounded.map(listing => listing.appId), request: bounded[0]?.request ?? { country: request.locale.country, language: request.locale.language, query: request.intent, category: request.category ?? null } });
         bounded.forEach((listing, rank) => addSeed(state, { ...request.locale, store: request.store, appId: listing.appId, intent: request.intent, rank, origins: [request.key], included: false }));
         const included = state.seeds.filter(seed => seed.included);
-        const pool = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting listing details" })), settings.preset);
-        const retained = new Set([...included, ...pool].slice(0, PRESETS[settings.preset].metadataLookups).map(candidateKey));
+        const pool = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting listing details" })), settings.preset, broadLimit);
+        const retained = new Set([...included, ...pool].slice(0, broadLimit).map(candidateKey));
         state.seeds = state.seeds.filter(seed => retained.has(candidateKey(seed)));
       } catch { signal.throwIfAborted(); gap(db, run.id, request.key, "Store discovery unavailable for the requested scope"); }
       state.completed.push(request.key); save();
     }
-    const lookup = async (seed: Seed) => {
+    const lookup = async (seed: Seed, limit = metadataLimit) => {
       const key = `details:${candidateKey(seed)}`;
-      if (state.completed.includes(key) || state.lookups >= PRESETS[settings.preset].metadataLookups) return;
+      if (state.completed.includes(key) || state.lookups >= limit) return;
       state.lookups++; save();
       try {
         const cached = db.query<SourceRow & { observed_at: number }, [Store,string,string,number]>("SELECT s.*,rs.observed_at FROM sources s JOIN run_sources rs ON rs.source_id=s.id WHERE s.kind='listing' AND s.store=? AND s.app_id=? AND s.locale=? AND rs.observed_at>=? ORDER BY rs.observed_at DESC LIMIT 1").get(seed.store, seed.appId, `${seed.country}:${seed.language}`, now() - FRESHNESS.listingMs);
@@ -130,9 +133,9 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
       } catch { signal.throwIfAborted(); assertAttempt(db, task.id, task.attempt_id!); state.completed.push(key); save(); gap(db, run.id, key, "Listing details unavailable; candidate was not silently substituted"); }
     };
     for (const seed of state.seeds.filter(s => s.included)) await lookup(seed);
-    const ordered = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting captured listing content" })), settings.preset);
-    for (const item of ordered) await lookup(state.seeds.find(s => candidateKey(s) === candidateKey(item))!);
-    for (const seed of state.candidates.filter(c => c.relevance !== "unrelated").slice(0, LIMITS.relatedSeeds)) {
+    const ordered = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting captured listing content" })), settings.preset, broadLimit);
+    for (const item of ordered) await lookup(state.seeds.find(s => candidateKey(s) === candidateKey(item))!, broadLimit);
+    for (const seed of (input.mode === "explore" ? [] : state.candidates.filter(c => c.relevance !== "unrelated").slice(0, LIMITS.relatedSeeds))) {
       const key = `related:${candidateKey(seed)}`; if (state.completed.includes(key)) continue;
       try {
         const related = await stores[seed.store].related(seed.appId, { country: seed.country, language: seed.language }, signal);
@@ -142,10 +145,94 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     }
     for (const seed of state.seeds) await lookup(seed);
     for (const candidate of state.candidates) candidate.origins = [...new Set([...(state.seeds.find(seed => candidateKey(seed) === candidateKey(candidate))?.origins ?? candidate.origins), ...(state.requests ?? []).filter(request => request.store === candidate.store && request.ids.includes(candidate.appId)).map(request => request.key)])];
-    const selection = selectCandidates(state.candidates, settings.appLimit);
+    let automatic = state.candidates.filter(candidate => !candidate.included);
+    let screeningScope: JsonObject = json(input);
+    let explorationReady = input.mode !== "explore";
+    if (input.mode === "explore" && automatic.length >= 2) {
+      try {
+        const candidates = automatic.map((candidate, index) => {
+          const listing = listingById(db, candidate.sourceId);
+          return { index, title: listing.title, category: listing.category ?? null, description: listing.description.slice(0, 500), store: listing.store, rating: listing.rating, ratingTotal: listing.ratingTotal };
+        });
+        const lead = await analyze(db, task, "exploration", { focus: input.query || null, candidates }, [], signal, aiOptions);
+        state.exploration = json(lead);
+        screeningScope = { mode: "topic", query: `${lead.title}. ${lead.problem}. Audience: ${lead.audience}`, categories: [], urls: [], websiteUrls: [] };
+        explorationReady = true;
+        save();
+        const terms = Array.isArray(lead.searchTerms) ? lead.searchTerms.filter((term): term is string => typeof term === "string" && !!term.trim()).slice(0, PRESETS[settings.preset].searchIntents) : [];
+        const before = new Set(state.seeds.map(candidateKey));
+        for (const [termIndex, term] of terms.entries()) for (const locale of locales) for (const store of enabled) {
+          const key = `explore-search:${termIndex}:${store}:${locale.country}`;
+          if (state.completed.includes(key)) continue;
+          try {
+            const found = (await stores[store].search(term, locale, signal)).slice(0, LIMITS.searchResults);
+            (state.requests ??= []).push({ key, store, ...locale, intent: term, ids: found.map(listing => listing.appId), request: found[0]?.request ?? { country: locale.country, language: locale.language, query: term, category: null } });
+            found.forEach((listing, rank) => addSeed(state, { ...locale, store, appId: listing.appId, intent: term, rank, origins: [key], included: false }));
+          } catch { signal.throwIfAborted(); gap(db, run.id, key, "Niche competition search was unavailable for the requested scope"); }
+          state.completed.push(key); save();
+        }
+        const expansion = state.seeds.filter(seed => !before.has(candidateKey(seed)));
+        const remaining = Math.max(0, metadataLimit - state.lookups);
+        const expanded = metadataCandidates(expansion.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting niche-search listing details" })), settings.preset, remaining);
+        for (const item of expanded) await lookup(state.seeds.find(seed => candidateKey(seed) === candidateKey(item))!);
+        for (const candidate of state.candidates) candidate.origins = [...new Set([...(state.seeds.find(seed => candidateKey(seed) === candidateKey(candidate))?.origins ?? candidate.origins), ...(state.requests ?? []).filter(request => request.store === candidate.store && request.ids.includes(candidate.appId)).map(request => request.key)])];
+        automatic = state.candidates.filter(candidate => !candidate.included);
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+        gap(db, run.id, "exploration", "Niche exploration failed validation; no broad-scope apps were treated as one competitor cohort");
+      }
+    } else if (input.mode === "explore") {
+      gap(db, run.id, "exploration", "Fewer than two usable app listings were available for niche exploration");
+    }
+    for (let offset = 0; offset < automatic.length; offset += 25) {
+      const batch = automatic.slice(offset, offset + 25);
+      if (!explorationReady) {
+        for (const candidate of batch) { candidate.cohortFit = "unrelated"; candidate.relevance = "unrelated"; }
+        continue;
+      }
+      if (aiOptions.configured === false) {
+        for (const candidate of batch) {
+          candidate.cohortFit = candidate.relevance === "direct" ? "core" : "unrelated";
+          if (candidate.cohortFit !== "core") candidate.relevance = "unrelated";
+        }
+        continue;
+      }
+      try {
+        const candidates = batch.map((candidate, index) => {
+          const listing = listingById(db, candidate.sourceId);
+          return { index, title: listing.title, category: listing.category ?? null, description: listing.description.slice(0, input.mode === "explore" ? 1500 : 5000), store: listing.store, discoveryOrigins: candidate.origins };
+        });
+        const screened = await analyze(db, task, "screening", { scope: screeningScope, candidates }, [], signal, aiOptions);
+        for (const result of screened.candidates) {
+          const candidate = batch[result.candidateIndex];
+          candidate.cohortFit = result.fit;
+          candidate.coreFunctionality = result.coreFunctionality;
+          candidate.reason = result.reason;
+          candidate.relevance = result.fit === "core" ? "direct" : "unrelated";
+        }
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+        for (const candidate of batch) {
+          candidate.cohortFit = candidate.relevance === "direct" ? "core" : "unrelated";
+          if (candidate.cohortFit !== "core") candidate.relevance = "unrelated";
+        }
+        gap(db, run.id, `screening:${offset}`, "Functional cohort screening failed; only strict lexical matches were retained");
+      }
+      save();
+    }
+    if (input.mode === "explore" && state.exploration) {
+      const core = state.candidates.filter(candidate => candidate.cohortFit === "core");
+      const observedAppCount = new Set(core.map(candidateKey)).size;
+      const observedDeveloperCount = new Set(core.map(candidate => candidate.developerId)).size;
+      const observedStores = [...new Set(core.map(candidate => candidate.store))];
+      const saturationSignal = observedAppCount <= 5 ? "few competitors observed in this bounded sample" : observedAppCount <= 15 ? "some competition observed in this bounded sample" : "many competitors observed in this bounded sample";
+      state.exploration = json({ ...state.exploration, observedAppCount, observedDeveloperCount, observedStores, saturationSignal, sampleSize: state.candidates.length });
+      for (const candidate of core) candidate.intent = `explore:${String(state.exploration.title)}`;
+    }
+    const selection = selectCandidates(state.candidates, appLimit);
     state.selected = selection.selected as CandidateRecord[]; state.developerCapRelaxed = selection.developerCapRelaxed; save();
-    if (state.lookups >= PRESETS[settings.preset].metadataLookups) gap(db, run.id, "metadata_limit", "Candidate and verification metadata lookup limit reached");
-    return json({ ...state, noMatchingApps: !state.selected.length, unusedSlots: settings.appLimit - state.selected.length, intents });
+    if (state.lookups >= metadataLimit) gap(db, run.id, "metadata_limit", "Candidate discovery metadata lookup limit reached");
+    return json({ ...state, noMatchingApps: !state.selected.length, unusedSlots: appLimit - state.selected.length, intents });
   };
 
   const collect = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
@@ -410,13 +497,29 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     const checks = schemas.verification.parse({ checks: verificationData.checks }).checks;
     const counterparts = verificationData.counterparts as unknown as CounterpartCheck[];
     const rows = sourcesForRun(db, run.id); const quotes = sourceQuotes(rows);
+    const discovery = discoveryState(db, run.id);
+    const cohort = discovery.selected.filter(candidate => !candidate.removed);
+    let marketOverview: JsonObject | null = null;
+    if (cohort.length && aiOptions.configured !== false) try {
+      const listingRows = cohort.map(candidate => sourceById(db, candidate.sourceId));
+      const candidates = cohort.map((candidate, index) => {
+        const listing = listingById(db, candidate.sourceId);
+        return { index, title: listing.title, category: listing.category ?? null, coreFunctionality: candidate.coreFunctionality ?? null, description: listing.description.slice(0, 1500) };
+      });
+      const market = await analyze(db, task, "market", { scope: discovery.exploration ?? decodeObject(run.input_json), candidates }, sourceQuotes(listingRows), signal, aiOptions);
+      const capabilities = (items: typeof market.commonCapabilities) => items.map(({ listingIndexes, ...item }) => ({ ...item, sourceIds: [...new Set(listingIndexes.map(index => cohort[index]?.sourceId).filter((sourceId): sourceId is string => !!sourceId))] }));
+      marketOverview = json({ ...market, commonCapabilities: capabilities(market.commonCapabilities), specializedCapabilities: capabilities(market.specializedCapabilities), appCount: cohort.length });
+    } catch (error) {
+      if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+      gap(db, run.id, "market_overview", "Combined app functionality summary failed validation");
+    }
     const assembled = proposed.map(opportunity => assembleOpportunity(opportunity, selected, findings, checks, counterparts, rows, now(), analyzedIds));
     let synthesis: JsonObject = { summary: proposed.length ? "Opportunities assembled from validated evidence." : selected.length ? "No source-backed opportunities could be established. Try a more specific need or additional stores/languages." : "No trusted review evidence was available. Inspect app selection and identity/collection coverage before retrying.", recommendations: [], limitations: [] };
     if (task.kind === "no_matching_apps") synthesis.summary = "No matching apps were found. Adjust the need, selected stores or countries and try again.";
     if (assembled.length) try {
-      synthesis = json(await analyze(db, task, "report", { opportunities: assembled, coverage: decodeObject(getRun(db, run.id).coverage_json), sources: quotes.filter(source => analyzedIds.has(source.id)) }, quotes, signal, aiOptions));
+      synthesis = json(await analyze(db, task, "report", { opportunities: assembled, exploration: discovery.exploration ?? null, marketOverview, coverage: decodeObject(getRun(db, run.id).coverage_json), sources: quotes.filter(source => analyzedIds.has(source.id)) }, quotes, signal, aiOptions));
     } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error; gap(db, run.id, "report_synthesis", "Report prose synthesis failed; validated evidence and code-computed assessment retained"); }
-    const summary = json({ ...synthesis, opportunities: assembled, counts: { collected: rows.filter(row => row.kind === "review").length, trustedUnique: new Set(rows.filter(row => row.kind === "review" && row.logical_review_key).map(row => row.logical_review_key)).size, selected: selected.length, analyzed: analyzedIds.size }, coverage: decodeObject(getRun(db, run.id).coverage_json), status: getRun(db, run.id).coverage === "gaps" ? "Completed with gaps" : "Completed", sampling: "Purposive sample; counts describe analyzed source reviews, not all users or distinct people.", noMatchingApps: task.kind === "no_matching_apps" });
+    const summary = json({ ...synthesis, exploration: discovery.exploration ?? null, marketOverview, opportunities: assembled, counts: { collected: rows.filter(row => row.kind === "review").length, trustedUnique: new Set(rows.filter(row => row.kind === "review" && row.logical_review_key).map(row => row.logical_review_key)).size, selected: selected.length, analyzed: analyzedIds.size }, coverage: decodeObject(getRun(db, run.id).coverage_json), status: getRun(db, run.id).coverage === "gaps" ? "Completed with gaps" : "Completed", sampling: "Purposive sample; counts describe analyzed source reviews, not all users or distinct people.", noMatchingApps: task.kind === "no_matching_apps" });
     checkpointTask(db, task.id, task.attempt_id!, { ready: true }, () => {
       for (const opportunity of assembled) db.query("INSERT INTO opportunities(id,run_id,report_key,title,priority,confidence,report_json,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,report_key) DO NOTHING").run(randomUUID(), run.id, opportunity.key, opportunity.title, opportunity.priority, opportunity.confidence, encodeJson(opportunity), now());
     });
@@ -445,7 +548,7 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
 
 function emptyCollection(now: number): JsonObject { return { version: randomUUID(), scopeHash: "empty", startedAt: now, endedAt: null, quota: 0, uniqueCount: 0, pages: 0, requestAttempts: 0, noNewIdPages: 0, cursor: null, seenCursors: [], stopReason: null, complete: false }; }
 function fallbackOpportunities(themes: Array<{ title: string; need: string; sourceIds: string[]; audience: string | null; audienceInferred: boolean; uncertainty: string[] }>): ProposedOpportunity[] {
-  return themes.map(theme => ({ key: `theme-${hash({ title: theme.title, sourceIds: theme.sourceIds })}`, title: theme.title, need: theme.need, audience: theme.audience, audienceInferred: theme.audienceInferred, perspective: "poor_execution", direction: null, sourceIds: theme.sourceIds, counterSourceIds: [], impact: "moderate", uncertainty: ["Preliminary opportunity assembled from source-backed themes after opportunity synthesis failed validation.", ...theme.uncertainty] }));
+  return themes.map(theme => ({ key: `theme-${hash({ title: theme.title, sourceIds: theme.sourceIds })}`, title: theme.title, need: theme.need, audience: theme.audience, audienceInferred: theme.audienceInferred, perspective: "poor_execution", direction: null, sourceIds: theme.sourceIds, counterSourceIds: [], impact: "moderate", concept: theme.need, coreFeatures: [theme.need, "Validate the workflow with the represented audience"], differentiators: ["Execute the evidenced core workflow more reliably than the reviewed cohort"], executionPriorities: ["Resolve the source-backed need before expanding scope"], competitorPattern: theme.title, uncertainty: ["Preliminary concept assembled from source-backed themes after concept synthesis failed validation.", ...theme.uncertainty] }));
 }
 function allFindings(db: DB, runId: string): Finding[] {
   return runTasks(db, runId).filter(task => task.stage === "analysis" && task.result_json).flatMap(task => {

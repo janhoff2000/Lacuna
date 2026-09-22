@@ -93,6 +93,8 @@ function coverageGapLabel(reason: string, count: number): string {
     return "The research limit prevented some competitor and alternative checks.";
   if (reason === "Competitor claims could not be validated")
     return "Some competitor claims could not be validated.";
+  if (reason === "Combined app functionality summary failed validation")
+    return "The combined functionality summary could not be generated; app listings and opportunity evidence remain available.";
   if (
     reason ===
     "Report prose synthesis failed; validated evidence and code-computed assessment retained"
@@ -501,7 +503,38 @@ export function OpportunityDetail({
           </Form>
         )}
       </div>
-      <p className="report-prose">{str(opportunity.need)}</p>
+      <p className="eyebrow">App concept</p>
+      <p className="report-prose">{str(opportunity.concept, str(opportunity.need))}</p>
+      {strings(opportunity.coreFeatures).length > 0 && (
+        <section className="concept-brief" aria-labelledby="concept-core-features">
+          <h3 id="concept-core-features">What it should do</h3>
+          <ul className="plain-list">
+            {strings(opportunity.coreFeatures).map((feature) => <li key={feature}>{feature}</li>)}
+          </ul>
+        </section>
+      )}
+      {strings(opportunity.differentiators).length > 0 && (
+        <section className="concept-brief" aria-labelledby="concept-differentiators">
+          <h3 id="concept-differentiators">How it should beat the competition</h3>
+          <ul className="plain-list">
+            {strings(opportunity.differentiators).map((item) => <li key={item}>{item}</li>)}
+          </ul>
+        </section>
+      )}
+      {strings(opportunity.executionPriorities).length > 0 && (
+        <section className="concept-brief" aria-labelledby="concept-execution">
+          <h3 id="concept-execution">Execution priorities</h3>
+          <ul className="plain-list">
+            {strings(opportunity.executionPriorities).map((item) => <li key={item}>{item}</li>)}
+          </ul>
+        </section>
+      )}
+      {str(opportunity.competitorPattern) && (
+        <dl className="audience">
+          <dt>Observed competitor gap</dt>
+          <dd>{str(opportunity.competitorPattern)}</dd>
+        </dl>
+      )}
       <ClaimSources
         ids={supportIds}
         base={base}
@@ -887,7 +920,7 @@ export function ReportWorkspace({
   const [search, setSearch] = useState("");
   const selected = opportunities.find((item) => item.id === selectedId);
   const filtered = opportunities.filter((item) =>
-    `${str(item.title)} ${str(item.need)}`
+    `${str(item.title)} ${str(item.concept)} ${str(item.need)} ${strings(item.coreFeatures).join(" ")}`
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
@@ -955,6 +988,98 @@ export function ReportWorkspace({
         )}
       </div>
     </div>
+  );
+}
+
+export function MarketOverview({ report }: { report?: JsonObject | null }) {
+  const overview = obj(report?.marketOverview);
+  const common = objects(overview.commonCapabilities);
+  const specialized = objects(overview.specializedCapabilities);
+  const workflow = strings(overview.sharedWorkflow);
+  if (!str(overview.coreProblem) && !common.length && !specialized.length) return null;
+  const capabilityList = (items: JsonObject[]) => (
+    <ul className="market-capability-list">
+      {items.map((capability, index) => {
+        const support = new Set(strings(capability.sourceIds)).size;
+        return (
+          <li key={`${str(capability.name)}-${index}`}>
+            <h3>{str(capability.name, "Unnamed capability")}</h3>
+            <p>{str(capability.description)}</p>
+            <span className="metadata">
+              Supported by {support} researched app {support === 1 ? "listing" : "listings"}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+  return (
+    <section className="market-overview" aria-labelledby="market-overview-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Current app landscape</p>
+          <h2 id="market-overview-title">What apps in this niche currently do</h2>
+        </div>
+        <span className="metadata">{num(overview.appCount)} apps combined</span>
+      </div>
+      <p className="market-core-problem">{str(overview.coreProblem)}</p>
+      {workflow.length > 0 && (
+        <div className="market-workflow">
+          <h3>Typical workflow</h3>
+          <ol>{workflow.map((step) => <li key={step}>{step}</li>)}</ol>
+        </div>
+      )}
+      <div className="market-capability-columns">
+        <section>
+          <h3>Common functionality</h3>
+          <p className="metadata">The baseline repeatedly documented across the cohort.</p>
+          {capabilityList(common)}
+        </section>
+        {specialized.length > 0 && (
+          <section>
+            <h3>Functionality only some apps offer</h3>
+            <p className="metadata">Meaningful variations that are not yet the shared baseline.</p>
+            {capabilityList(specialized)}
+          </section>
+        )}
+      </div>
+      <div className="market-comparison-summary">
+        <span className="eyebrow">Baseline for the app suggestions</span>
+        <p>{str(overview.comparisonSummary)}</p>
+      </div>
+    </section>
+  );
+}
+
+export function ExploreLead({ report }: { report?: JsonObject | null }) {
+  const lead = obj(report?.exploration);
+  if (!str(lead.title)) return null;
+  return (
+    <section className="explore-lead" aria-labelledby="explore-lead-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Explore result</p>
+          <h2 id="explore-lead-title">{str(lead.title)}</h2>
+        </div>
+        <span className="metadata">Promising niche lead · not market proof</span>
+      </div>
+      <p className="explore-problem">{str(lead.problem)}</p>
+      <dl className="explore-facts">
+        <div><dt>Audience</dt><dd>{str(lead.audience)}</dd></div>
+        <div><dt>Competition signal</dt><dd>{str(lead.saturationSignal)}</dd></div>
+        <div><dt>Observed apps</dt><dd>{num(lead.observedAppCount)}</dd></div>
+        <div><dt>Observed developers</dt><dd>{num(lead.observedDeveloperCount)}</dd></div>
+      </dl>
+      <div className="explore-rationale">
+        <h3>Why it was selected</h3>
+        <p>{str(lead.whyPromising)}</p>
+      </div>
+      {strings(lead.uncertainty).length > 0 && (
+        <Notice title="What Explore cannot establish">
+          <ul className="plain-list">{strings(lead.uncertainty).map((item) => <li key={item}>{item}</li>)}</ul>
+        </Notice>
+      )}
+    </section>
   );
 }
 export function CoverageDetails({ view }: { view: ResearchView }) {
@@ -1085,7 +1210,8 @@ export function CoverageDetails({ view }: { view: ResearchView }) {
             {requestedStores.map(storeLabel).join(" and ")}
           </p>
           <p>
-            App listing maximum: {num(view.run.settings.appLimit)} · Review
+            Apps reviewed maximum: {num(view.run.input?.mode === "explore" ? view.run.settings.exploreAppLimit : view.run.settings.appLimit)} · Explore
+            discovery pool: {num(view.run.settings.discoveryLimit)} · Review
             selection maximum: {num(view.run.settings.reviewLimit)}
           </p>
           {streams.length ? (

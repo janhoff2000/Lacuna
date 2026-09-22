@@ -89,6 +89,8 @@ export function parseResearchForm(
     errors.stores = "Choose at least one store.";
   if (!["quick", "deep"].includes(preset))
     errors.preset = "Choose Quick or Deep.";
+  const discoveryLimit = integer("discoveryLimit", 2_000);
+  const exploreAppLimit = integer("exploreAppLimit", 100);
   const appLimit = integer("appLimit", 100);
   const reviewLimit = integer("reviewLimit", 20_000);
   const budgetUsd = Number(field("budgetUsd"));
@@ -102,7 +104,7 @@ export function parseResearchForm(
   const direction = field("direction");
   if (!["android_to_ios", "ios_to_android", "both"].includes(direction))
     errors.direction = "Choose a direction.";
-  const categories = (
+  let categories = (
     Array.isArray(values.categories) ? values.categories : []
   ).flatMap((label) => {
     const category = CATEGORIES.find((category) => category.label === label);
@@ -113,7 +115,7 @@ export function parseResearchForm(
   const websiteUrls = list(field("websiteUrls"));
   const query = field("query").trim();
   if (withInput) {
-    if (!["topic", "category"].includes(mode))
+    if (!["topic", "category", "explore"].includes(mode))
       errors.mode = "Choose a research mode.";
     if (mode === "topic" && !query && !urls.length)
       errors.query = "Enter a topic, a need, or a store URL below.";
@@ -121,8 +123,10 @@ export function parseResearchForm(
       errors.query = "Keep the topic under 2,000 characters.";
     if (mode === "category" && !categories.length)
       errors.categories = "Choose at least one category.";
+    if (mode === "explore" && !categories.length)
+      categories = CATEGORIES.map((category) => ({ ...category }));
     if (urls.length > appLimit)
-      errors.urls = "The included apps exceed your app listing maximum.";
+      errors.urls = "The included apps exceed your reviewed-app maximum.";
     for (const url of urls)
       try {
         parseStoreUrl(url);
@@ -151,6 +155,8 @@ export function parseResearchForm(
       countries,
       languages,
       stores,
+      discoveryLimit,
+      exploreAppLimit,
       appLimit,
       reviewLimit,
       budgetUsd,
@@ -168,8 +174,8 @@ const errorCopy: Record<string, string> = {
     "This saved opportunity is no longer available. Reload the list.",
   "Candidates can be edited only while waiting for app review":
     "App review has already ended. Reload to see the current run state.",
-  "Remove an app or start a run with a higher listing limit":
-    "Your app listing maximum is reached. Remove an app before adding another.",
+  "Remove an app or start a run with a higher reviewed-app limit":
+    "Your reviewed-app maximum is reached. Remove an app before adding another.",
   "Candidate metadata lookup limit reached":
     "The app lookup allowance is used up. Continue with these apps or start a new research run.",
   "Candidate review must be confirmed":

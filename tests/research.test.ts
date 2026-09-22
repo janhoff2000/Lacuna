@@ -41,9 +41,12 @@ const fakeAi: AiTransport = async request => {
   const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
   const data = JSON.parse(request.input as string).untrustedResearchData;
   let output: unknown;
-  if (kind === "lacuna_extraction") output = { originalLanguage: "en", translation: null, findings: [{ excerptIndex: 0, need: "Reliable offline tracking", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", uncertainty: [] }] };
+  if (kind === "lacuna_screening") output = { candidates: data.candidates.map((candidate: { index: number }) => ({ candidateIndex: candidate.index, fit: "core", coreFunctionality: "Sleep tracking", reason: "The listing's primary workflow is sleep tracking." })) };
+  else if (kind === "lacuna_exploration") output = { title: "Offline sleep journals", problem: "People need to record and understand sleep without dependable connectivity.", audience: "People monitoring sleep in low-connectivity settings", candidateIndexes: data.candidates.slice(0, 2).map((candidate: { index: number }) => candidate.index), searchTerms: ["offline sleep journal", "sleep tracking without internet"], whyPromising: "Several sampled listings address sleep logging, while offline reliability remains a hypothesis to test in reviews.", uncertainty: ["The bounded chart sample does not establish market size or low saturation."] };
+  else if (kind === "lacuna_market") output = { coreProblem: "Help people record and understand sleep patterns.", sharedWorkflow: ["Record sleep", "Review patterns", "Adjust habits"], commonCapabilities: [{ name: "Sleep logging", description: "Capture sleep sessions and review recorded patterns.", listingIndexes: data.candidates.map((candidate: { index: number }) => candidate.index) }], specializedCapabilities: data.candidates.length > 1 ? [{ name: "Offline journal", description: "Keep recording without a connection.", listingIndexes: [0] }] : [], comparisonSummary: "The cohort establishes sleep logging as the baseline; a new concept should improve reliability and explanation." };
+  else if (kind === "lacuna_extraction") output = { originalLanguage: "en", translation: null, findings: [{ excerptIndex: 0, need: "Reliable offline tracking", audience: null, audienceInferred: false, impact: "moderate", sentiment: "negative", uncertainty: [] }] };
   else if (kind === "lacuna_grouping") output = { themes: [{ title: "Reliable offline tracking", need: "Reliable offline tracking", findingIndexes: data.findings.map((_f: unknown, index: number) => index), audience: null, audienceInferred: false, uncertainty: [] }] };
-  else if (kind === "lacuna_opportunities") output = { opportunities: [{ key: "offline", title: "Reliable offline tracking", need: "Reliable offline tracking", audience: null, audienceInferred: false, perspective: "poor_execution", direction: null, sourceIds: [...new Set(data.themes.flatMap((theme: { sourceIds: string[] }) => theme.sourceIds))], counterSourceIds: [], impact: "moderate", uncertainty: [] }] };
+  else if (kind === "lacuna_opportunities") output = { opportunities: [{ key: "offline", title: "Offline-first sleep journal", need: "Reliable offline tracking", audience: null, audienceInferred: false, perspective: "poor_execution", direction: null, sourceIds: [...new Set(data.themes.flatMap((theme: { sourceIds: string[] }) => theme.sourceIds))], counterSourceIds: [], impact: "moderate", concept: "A sleep journal that records and explains sleep patterns without requiring connectivity.", coreFeatures: ["Offline sleep logging", "Pattern explanations"], differentiators: ["Reliable offline capture"], executionPriorities: ["Never lose a sleep entry"], competitorPattern: "Existing trackers make core logging connectivity-dependent.", uncertainty: [] }] };
   else if (kind === "lacuna_verification") {
     const source = data.sources.find((source: QuoteSource) => source.kind === "listing");
     output = { checks: [{ key: "offline", outcome: "supported", explanation: "The source supports investigating execution quality.", citations: [{ sourceId: source.id, excerpt: source.text.slice(0, 20), sourceKind: source.kind, sourceUrl: source.url, provenance: source.provenance }], pricing: [], feasibility: "not_applicable" }] };
@@ -69,6 +72,37 @@ async function drive(runId: string, dependencies = deps(), limit = 120) {
   throw new Error("Pipeline did not finish within deterministic step bound");
 }
 describe("fixed research pipeline with fake adapters", () => {
+  test("explore mode narrows broad charts to one evidence-limited niche before review collection", async () => {
+    const exploreInput = { mode: "explore", query: "", urls: [], categories: [{ label: "Health and fitness", apple: "6013", google: "HEALTH_AND_FITNESS" }], websiteUrls: [] };
+    const runId = createResearch(db, exploreInput, { ...settings, appLimit: 1, exploreAppLimit: 2 });
+    await drive(runId);
+    const state = discoveryState(db, runId);
+    expect(state.exploration).toMatchObject({ title: "Offline sleep journals", observedAppCount: 2, observedDeveloperCount: 2, saturationSignal: "few competitors observed in this bounded sample" });
+    expect(state.requests?.some(request => request.key.startsWith("explore-search:"))).toBe(true);
+    expect(state.selected).toHaveLength(2);
+    expect(readResearch(db, runId).report?.exploration).toMatchObject({ title: "Offline sleep journals" });
+  });
+
+  test("functional cohort screening excludes related apps with a different core job", async () => {
+    const locale = { country: "US", language: "en" };
+    const listings = [
+      normalizeListing("apple", { id: "123456", title: "League Team Builder", description: "Build League of Legends team compositions for tournaments.", developerId: "riot" }, locale, {}),
+      normalizeListing("apple", { id: "789012", title: "Valorant Tracker", description: "Track Valorant matches and competitive rank.", developerId: "riot" }, locale, {}),
+    ];
+    const base = adapter("apple");
+    const apple: StoreAdapter = { ...base, search: async () => listings, details: async appId => listings.find(listing => listing.appId === appId)!, related: async () => [] };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_screening") return fakeAi(request, signal);
+      const data = JSON.parse(request.input as string).untrustedResearchData;
+      return { id: "cohort-screen", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ candidates: data.candidates.map((candidate: { index: number; title: string }) => ({ candidateIndex: candidate.index, fit: candidate.title.includes("League") ? "core" : "adjacent", coreFunctionality: candidate.title.includes("League") ? "League team composition" : "Valorant match tracking", reason: candidate.title.includes("League") ? "Same game and team-building workflow." : "Different game and tracking workflow." })) }) };
+    };
+    const runId = createResearch(db, { ...input, query: "League of Legends team comp builder" }, { ...settings, stores: ["apple"], countries: ["US"], reviewCandidates: true });
+    await drive(runId, deps({ apple, aiTransport: transport }));
+    expect(discoveryState(db, runId).selected.map(candidate => candidate.title)).toEqual(["League Team Builder"]);
+    expect(discoveryState(db, runId).candidates.find(candidate => candidate.title === "Valorant Tracker")?.cohortFit).toBe("adjacent");
+  });
+
   test("each extracted finding inherits its source from the one-review task", async () => {
     const runId = createResearch(db, input, settings);
     await drive(runId);
@@ -128,7 +162,7 @@ describe("fixed research pipeline with fake adapters", () => {
     const report = readResearch(db, runId);
     expect(report.opportunities).toHaveLength(1);
     expect(report.opportunities[0]).toMatchObject({ title: "Reliable offline tracking" });
-    expect(report.opportunities[0].uncertainty).toContain("Preliminary opportunity assembled from source-backed themes after opportunity synthesis failed validation.");
+    expect(report.opportunities[0].uncertainty).toContain("Preliminary concept assembled from source-backed themes after concept synthesis failed validation.");
   });
   test("progressive discovery, locale dedup, extraction, themes, verification and report; notes survive refresh", async () => {
     const runId = createResearch(db, input, settings);
@@ -138,6 +172,8 @@ describe("fixed research pipeline with fake adapters", () => {
     expect(discoveryState(db, runId).selected).toHaveLength(2); expect(progress.message).toBe("Completed with gaps");
     const report = readResearch(db, runId); expect(report.opportunities).toHaveLength(1); expect(report.opportunities[0].confidence).toBe("medium");
     expect(report.opportunities[0].counts).toMatchObject({ supportingReviews: 6, products: 2, developers: 2 });
+    expect(report.report?.marketOverview).toMatchObject({ coreProblem: "Help people record and understand sleep patterns.", appCount: 2 });
+    expect((report.report?.marketOverview as Record<string, unknown>).commonCapabilities).toEqual([expect.objectContaining({ name: "Sleep logging", sourceIds: expect.any(Array) })]);
     const savedId = saveOpportunity(db, report.opportunities[0].id as string); updateSaved(db, savedId, "consider", "Check this next month");
     const oldReport = JSON.stringify(report.report); const next = refreshResearch(db, runId);
     expect(next).not.toBe(runId); expect(getRun(db, next).status).toBe("queued"); expect(JSON.stringify(readResearch(db, runId).report)).toBe(oldReport);
@@ -333,7 +369,7 @@ describe("Task 3 review regressions", () => {
     const now = Date.now(); const date = new Date(now).toISOString();
     const reviews: SourceRow[] = Array.from({ length: 12 }, (_, i) => ({ id: `r${i}`, store: "apple", app_id: String(101 + i % 2), review_id: String(i), logical_review_key: `apple:${i}`, kind: "review", url: "https://apps.apple.com/app/id101", payload_json: JSON.stringify({ text: sourceText, date }), captured_at: now }));
     const listings: SourceRow[] = [101, 102].map(appId => ({ id: `listing-${appId}`, store: "apple", app_id: String(appId), review_id: null, kind: "listing", url: `https://apps.apple.com/app/id${appId}`, payload_json: JSON.stringify({ developerId: "apple:one-company", description: "Official offline tracking." }), captured_at: now }));
-    const proposed: ProposedOpportunity = { key: "offline", title: "Offline", need: "Offline", audience: null, audienceInferred: false, perspective: "poor_execution", direction: null, sourceIds: reviews.map(row => row.id), counterSourceIds: [], impact: "severe", uncertainty: [] };
+    const proposed: ProposedOpportunity = { key: "offline", title: "Offline", need: "Offline", audience: null, audienceInferred: false, perspective: "poor_execution", direction: null, sourceIds: reviews.map(row => row.id), counterSourceIds: [], impact: "severe", concept: "Offline tracking", coreFeatures: ["Capture", "Sync"], differentiators: ["Reliability"], executionPriorities: ["No data loss"], competitorPattern: "Unreliable offline use", uncertainty: [] };
     const checks = schemas.verification.parse({ checks: [{ key: "offline", outcome: "supported", explanation: "Official source", citations: [{ sourceId: "listing-101", excerpt: "Official offline tracking.", sourceKind: "listing", sourceUrl: listings[0].url, provenance: "official_listing" }], pricing: [], feasibility: "not_applicable" }] }).checks;
     const pairs: CounterpartCheck[] = [101, 102].map(appId => ({ source: `apple:${appId}`, destination: "google", state: "verified", queries: [], candidates: [], alternativeCandidates: [], unavailableMarkets: [], sameProductSearch: true, needBasedSearch: true, verifiedSourceUrl: `https://example.test/${appId}`, verifiedDestinationId: `google:com.product.${appId}`, conclusion: "Verified exact links", feasibility: "Not verified" }));
     const opportunity = assembleOpportunity(proposed, reviews, [], checks, pairs, [...reviews, ...listings], now, new Set(reviews.map(row => row.id)));

@@ -10,7 +10,7 @@ import { collectionRequestCount, parseCollectionCheckpoint, replaceCollectionTas
 import { saveSource, type SourceSnapshot } from "../server/sources";
 import { decodeObject, encodeJson, parseRunSettings, type RunSettings } from "../shared/types";
 
-const settings: RunSettings = { preset: "quick", countries: ["US"], spokenLanguages: ["en"], appLimit: 10, reviewLimit: 2000, reviewCandidates: false };
+const settings: RunSettings = { preset: "quick", countries: ["US"], spokenLanguages: ["en"], discoveryLimit: 300, exploreAppLimit: 20, appLimit: 10, reviewLimit: 2000, reviewCandidates: false };
 let directory: string; let db: DB; let path: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "lacuna-foundation-")); path = join(directory, "test.sqlite"); db = openDatabase(path); });
 afterEach(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });

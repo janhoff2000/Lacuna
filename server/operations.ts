@@ -26,7 +26,8 @@ export function requireSameOrigin(request: Request): void {
 export function createResearch(db: DB, input: unknown, settings: unknown, budgetUsd?: number): string {
   const parsedInput = researchInputSchema.parse(input); const parsedSettings = researchSettings(settings);
   const includes = new Set(parsedInput.urls.map(url => { const reference = parseStoreUrl(url); return `${reference.store}:${reference.appId}`; }));
-  if (includes.size > parsedSettings.appLimit) throw new Error("Explicit inclusions exceed the listing limit");
+  const appLimit = parsedInput.mode === "explore" ? parsedSettings.exploreAppLimit : parsedSettings.appLimit;
+  if (includes.size > appLimit) throw new Error("Explicit inclusions exceed the listing limit");
   return createRun(db, JSON.parse(encodeJson(parsedInput)), parsedSettings, budgetUsd);
 }
 export function listResearch(db: DB) { return db.query<RunRow,[]>("SELECT * FROM runs ORDER BY created_at DESC,id DESC LIMIT 200").all().map(row => ({ ...row, input: decodeObject(row.input_json), settings: decodeObject(row.settings_json), budget: budgetState(db, row.id) })); }
@@ -61,7 +62,17 @@ export function readSettings(db: DB) {
     return { appearance: "dark", defaults, spokenLanguages: defaults.spokenLanguages, model: DEFAULT_MODEL, configured: apiConfigured(), models: Object.keys(MODEL_CATALOG), modelCatalog: MODEL_CATALOG, setup: "Set OPENAI_API_KEY in the ignored local .env file and restart the worker." };
   }
   const preferences = z.object({ appearance: z.enum(["system", "light", "dark"]), defaults: z.unknown(), spokenLanguages: z.array(z.string()).min(1).max(20), model: z.string().trim().min(1).max(100) }).strict().parse(saved);
-  const defaults = researchSettings(preferences.defaults);
+  const storedDefaults = researchSettings(preferences.defaults);
+  const defaults = researchSettings({
+    ...storedDefaults,
+    discoveryLimit: storedDefaults.discoveryLimit,
+    exploreAppLimit: storedDefaults.exploreAppLimit,
+    appLimit: storedDefaults.preset === "quick" && [10, 30].includes(storedDefaults.appLimit)
+      ? PRESETS.quick.apps
+      : storedDefaults.preset === "deep" && [30, 75].includes(storedDefaults.appLimit)
+        ? PRESETS.deep.apps
+        : storedDefaults.appLimit,
+  });
   return { ...preferences, defaults, spokenLanguages: defaults.spokenLanguages, configured: apiConfigured(), models: Object.keys(MODEL_CATALOG), modelCatalog: MODEL_CATALOG, setup: "Set OPENAI_API_KEY in the ignored local .env file and restart the worker." };
 }
 export function updateSettings(db: DB, value: unknown): void {
@@ -110,8 +121,11 @@ export async function addCandidate(db: DB, runId: string, url: string, signal: A
     const { run, task, state } = candidateReview(db, runId); const settings = researchSettings(decodeObject(run.settings_json));
     const pending = state.additions ?? [];
     if (state.selected.some(candidate => candidate.store === reference.store && candidate.appId === reference.appId) || pending.some(item => item.key === key)) return null;
-    if (state.selected.length + pending.length >= settings.appLimit) throw new Error("Remove an app or start a run with a higher listing limit");
-    if (state.lookups >= PRESETS[settings.preset].metadataLookups) throw new Error("Candidate metadata lookup limit reached");
+    const input = researchInputSchema.parse(decodeObject(run.input_json));
+    const lookupLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+    const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
+    if (state.selected.length + pending.length >= appLimit) throw new Error("Remove an app or start a run with a higher reviewed-app limit");
+    if (state.lookups >= lookupLimit) throw new Error("Candidate metadata lookup limit reached");
     state.lookups++; state.additions = [...pending, { key, reservationId, processInstanceId }];
     db.query("UPDATE tasks SET checkpoint_json=? WHERE id=?").run(encodeJson(state), task.id);
     return { country: reference.country ?? settings.countries[0], taskId: task.id };
@@ -125,9 +139,12 @@ export async function addCandidate(db: DB, runId: string, url: string, signal: A
     if (listing.store !== reference.store || listing.appId !== reference.appId) throw new Error("Listing response identity mismatch");
     transaction(db, () => {
       const { run, task, state } = candidateReview(db, runId); const settings = researchSettings(decodeObject(run.settings_json));
+      const input = researchInputSchema.parse(decodeObject(run.input_json));
+      const lookupLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+      const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
       if (!state.additions?.some(item => item.key === key && item.reservationId === reservationId && item.processInstanceId === processInstanceId)) throw new Error("Candidate reservation no longer active");
       if (state.selected.some(candidate => candidate.store === reference.store && candidate.appId === reference.appId)) return;
-      if (state.selected.length >= settings.appLimit || state.lookups > PRESETS[settings.preset].metadataLookups) throw new Error("Candidate limit reached");
+      if (state.selected.length >= appLimit || state.lookups > lookupLimit) throw new Error("Candidate limit reached");
       const sourceId = saveSource(db, runId, task.id, "manual-inclusion-v1", { kind: "listing", store: reference.store, appId: reference.appId, locale: `${listing.country}:${listing.language}`, url: listing.url, payload: JSON.parse(encodeJson(listing)), capturedAt: listing.capturedAt }, { explicit: true, request: listing.request });
       const candidate: CandidateRecord = { store: listing.store, appId: listing.appId, sourceId, country: listing.country, language: listing.language, title: listing.title, developerId: listing.developerId, rank: -1, relevance: "direct", reason: "Explicitly added during candidate review", included: true, intent: "Explicit inclusion", origins: [url] };
       state.selected.push(candidate); state.candidates = state.candidates.filter(old => old.store !== candidate.store || old.appId !== candidate.appId); state.candidates.push(candidate);

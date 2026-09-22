@@ -48,6 +48,7 @@ export const num = (value: Json | undefined): number =>
   typeof value === "number" ? value : 0;
 export const title = (input: JsonObject): string =>
   str(input.query) ||
+  (input.mode === "explore" ? "Explore app niches" : "") ||
   objects(input.categories)
     .map((category) => str(category.label))
     .join(", ") ||

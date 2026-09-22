@@ -66,6 +66,8 @@ export interface RunSettings {
   preset: "quick" | "deep";
   countries: string[];
   spokenLanguages: string[];
+  discoveryLimit: number;
+  exploreAppLimit: number;
   appLimit: number;
   reviewLimit: number;
   reviewCandidates: boolean;
@@ -78,9 +80,11 @@ export function parseRunSettings(value: unknown): RunSettings {
   if (value.preset !== "quick" && value.preset !== "deep") throw new Error("Invalid preset");
   if (!Array.isArray(value.countries) || !value.countries.length || !value.countries.every(c => typeof c === "string" && /^[A-Z]{2}$/.test(c))) throw new Error("Explicit country codes required");
   if (!Array.isArray(value.spokenLanguages) || !value.spokenLanguages.length || !value.spokenLanguages.every(language => typeof language === "string" && LANGUAGE_TAG.test(language))) throw new Error("Explicit spoken language codes required");
-  for (const key of ["appLimit", "reviewLimit"] as const) {
-    if (typeof value[key] !== "number" || !Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error(`Invalid ${key}`);
+  const discoveryLimit = value.discoveryLimit ?? (value.preset === "deep" ? 750 : 300);
+  const exploreAppLimit = value.exploreAppLimit ?? (value.preset === "deep" ? 40 : 20);
+  for (const [key, candidate] of [["discoveryLimit", discoveryLimit], ["exploreAppLimit", exploreAppLimit], ["appLimit", value.appLimit], ["reviewLimit", value.reviewLimit]] as const) {
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) throw new Error(`Invalid ${key}`);
   }
   if (typeof value.reviewCandidates !== "boolean") throw new Error("Invalid candidate review choice");
-  return value as RunSettings;
+  return { ...value, discoveryLimit, exploreAppLimit } as RunSettings;
 }
