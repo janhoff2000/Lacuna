@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 4,
+  "instructions": {
+    "path": "AGENTS.md"
+  },
+  "integrations": {
+    "enabled": [
+      "claude",
+      "codex"
+    ],
+    "options": {
+      "cursorAutoApprove": true,
+      "antigravityGlobalSync": true,
+      "claudeScope": "project",
+      "copilotCliPath": ".mcp.json"
+    }
+  },
+  "syncMode": "source-only",
+  "mcp": {
+    "servers": {
+      "shadcn": {
+        "description": "Project-local shadcn component MCP server",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "shadcn@latest",
+          "mcp"
+        ],
+        "targets": [
+          "claude",
+          "codex"
+        ]
+      }
+    }
+  },
+  "workspace": {
+    "vscode": {
+      "hideGenerated": false,
+      "hiddenPaths": []
+    }
+  },
+  "lastSync": null,
+  "lastSyncSourceHash": null,
+  "activeProfile": null
+}
