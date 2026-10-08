@@ -18,13 +18,13 @@ function running(budget = 1) { const runId = createRun(db, { need: "test" }, set
 function reservation(taskId: string, attemptId: string, input = 1000, output = 1000) { const request = reserveAi(db, taskId, attemptId, { maxInputTokens: input, maxOutputTokens: output }); if (!("id" in request)) throw new Error(request.refused); return request; }
 
 describe("database and JSON", () => {
-  test("exactly nine tables, foreign keys, WAL, busy timeout and idempotent migrations", () => {
+  test("exactly thirteen tables, foreign keys, WAL, busy timeout and idempotent migrations", () => {
     expect(db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     expect(db.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(db.query("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
-    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
-    expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name)).toEqual(["ai_requests", "analyses", "opportunities", "run_sources", "runs", "saved_opportunities", "settings", "sources", "tasks"]);
-    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 5 }); second.close();
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 7 });
+    expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name)).toEqual(["ai_requests", "analyses", "app_availability", "apps", "opportunities", "run_sources", "runs", "saved_opportunities", "settings", "sources", "tasks", "transfer_listings", "transfer_screenings"]);
+    const second = openDatabase(path); expect(second.query("PRAGMA user_version").get()).toEqual({ user_version: 7 }); second.close();
     expect(() => createTask(db, "missing", "collection", "key")).toThrow();
   });
   test("transaction rollback, async refusal and runtime JSON validation", () => {

@@ -9,7 +9,7 @@ import { googleAdapter } from "./collectors/google";
 import { parseStoreUrl, type StoreAdapter } from "./collectors/common";
 import { discoveryState, runTasks, sourcesForRun, successfullyAnalyzedSourceIds, type CandidateRecord } from "./research";
 import { createRun, getRun, pauseRun, cancelRun, resumeRun, workerStatus, type RunRow } from "./runs";
-import { defaultResearchSettings, researchInputSchema, researchSettings } from "./research-input";
+import { broadDiscovery, defaultResearchSettings, researchInputSchema, researchSettings } from "./research-input";
 import { saveSource } from "./sources";
 import { PRESETS } from "./policy";
 
@@ -24,9 +24,11 @@ export function requireSameOrigin(request: Request): void {
   if (!origin || origin !== new URL(request.url).origin || request.headers.get("sec-fetch-site") === "cross-site") throw new Response("Cross-origin mutation rejected", { status: 403 });
 }
 export function createResearch(db: DB, input: unknown, settings: unknown, budgetUsd?: number): string {
-  const parsedInput = researchInputSchema.parse(input); const parsedSettings = researchSettings(settings);
+  const parsedInput = researchInputSchema.parse(input);
+  // Transfer research reads the source market only; the target market is checked, never sampled for reviews.
+  const parsedSettings = researchSettings((parsedInput.mode === "transfer" || parsedInput.mode === "ideas") && settings && typeof settings === "object" ? { ...settings, countries: [parsedInput.sourceCountry], crossPlatform: false, ...(parsedInput.mode === "ideas" ? { reviewCandidates: false } : {}) } : settings);
   const includes = new Set(parsedInput.urls.map(url => { const reference = parseStoreUrl(url); return `${reference.store}:${reference.appId}`; }));
-  const appLimit = parsedInput.mode === "explore" ? parsedSettings.exploreAppLimit : parsedSettings.appLimit;
+  const appLimit = broadDiscovery(parsedInput.mode) ? parsedSettings.exploreAppLimit : parsedSettings.appLimit;
   if (includes.size > appLimit) throw new Error("Explicit inclusions exceed the listing limit");
   return createRun(db, JSON.parse(encodeJson(parsedInput)), parsedSettings, budgetUsd);
 }
@@ -52,7 +54,10 @@ export function researchProgress(db: DB, runId: string) {
   const settings = researchSettings(decodeObject(run.settings_json));
   const configuration = tasks.some(task => task.error_code === "configuration");
   const discovery = discoveryState(db, runId);
-  return { id: run.id, status: run.status, reason: run.reason, stage: run.stage, coverage: run.coverage, coverageDetails: decodeObject(run.coverage_json), counts: { ...counts, analyzed }, pipeline: { reviewCandidates: settings.reviewCandidates, grouping: { processed: typeof groupingCheckpoint.groupedFindings === "number" ? groupingCheckpoint.groupedFindings : groupingTask?.status === "completed" ? findings : 0, total: findings } }, completedTasks: tasks.filter(t => t.status === "completed").length, totalTasks: tasks.length, candidates: discovery.selected.length ? discovery.selected : discovery.candidates, preliminary: tasks.filter(t => t.stage === "grouping").map(t => t.result_json ? decodeObject(t.result_json) : decodeObject(t.checkpoint_json)), budget: budgetState(db, runId), worker,
+  // A market-transfer survey collects no reviews; its progress is the listing table.
+  const surveyed = db.query<{ sampled: number; checked: number | null; missing: number | null; screened: number | null }, [string]>("SELECT COUNT(*) AS sampled,SUM(availability!='pending') AS checked,SUM(availability='unavailable') AS missing,SUM(availability='unavailable' AND fit IS NOT NULL) AS screened FROM transfer_listings WHERE run_id=?").get(runId)!;
+  const survey = surveyed.sampled ? { sampled: surveyed.sampled, checked: surveyed.checked ?? 0, missing: surveyed.missing ?? 0, screened: surveyed.screened ?? 0 } : null;
+  return { id: run.id, status: run.status, reason: run.reason, stage: run.stage, coverage: run.coverage, coverageDetails: decodeObject(run.coverage_json), survey, counts: { ...counts, analyzed }, pipeline: { reviewCandidates: settings.reviewCandidates, grouping: { processed: typeof groupingCheckpoint.groupedFindings === "number" ? groupingCheckpoint.groupedFindings : groupingTask?.status === "completed" ? findings : 0, total: findings } }, completedTasks: tasks.filter(t => t.status === "completed").length, totalTasks: tasks.length, candidates: discovery.selected.length ? discovery.selected : discovery.candidates, preliminary: tasks.filter(t => t.stage === "grouping").map(t => t.result_json ? decodeObject(t.result_json) : decodeObject(t.checkpoint_json)), budget: budgetState(db, runId), worker,
     message: run.status === "queued" && worker !== "running" ? "Queued — worker not running. Start with bun run worker." : run.status === "paused" && configuration ? "Configure OPENAI_API_KEY in the local ignored .env file, then Resume." : run.status === "paused" && run.reason === "budget" ? "Paused for budget or uncertain provider cost. Inspect spending before resuming." : run.status === "paused" && run.reason === "app_review" ? "Review the selected apps, then Continue." : run.status === "completed" && run.coverage === "gaps" ? "Completed with gaps" : run.status };
 }
 export function readSettings(db: DB) {
@@ -122,8 +127,8 @@ export async function addCandidate(db: DB, runId: string, url: string, signal: A
     const pending = state.additions ?? [];
     if (state.selected.some(candidate => candidate.store === reference.store && candidate.appId === reference.appId) || pending.some(item => item.key === key)) return null;
     const input = researchInputSchema.parse(decodeObject(run.input_json));
-    const lookupLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
-    const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
+    const lookupLimit = broadDiscovery(input.mode) ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+    const appLimit = broadDiscovery(input.mode) ? settings.exploreAppLimit : settings.appLimit;
     if (state.selected.length + pending.length >= appLimit) throw new Error("Remove an app or start a run with a higher reviewed-app limit");
     if (state.lookups >= lookupLimit) throw new Error("Candidate metadata lookup limit reached");
     state.lookups++; state.additions = [...pending, { key, reservationId, processInstanceId }];
@@ -140,8 +145,8 @@ export async function addCandidate(db: DB, runId: string, url: string, signal: A
     transaction(db, () => {
       const { run, task, state } = candidateReview(db, runId); const settings = researchSettings(decodeObject(run.settings_json));
       const input = researchInputSchema.parse(decodeObject(run.input_json));
-      const lookupLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
-      const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
+      const lookupLimit = broadDiscovery(input.mode) ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+      const appLimit = broadDiscovery(input.mode) ? settings.exploreAppLimit : settings.appLimit;
       if (!state.additions?.some(item => item.key === key && item.reservationId === reservationId && item.processInstanceId === processInstanceId)) throw new Error("Candidate reservation no longer active");
       if (state.selected.some(candidate => candidate.store === reference.store && candidate.appId === reference.appId)) return;
       if (state.selected.length >= appLimit || state.lookups > lookupLimit) throw new Error("Candidate limit reached");

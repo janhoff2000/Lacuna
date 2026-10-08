@@ -32,7 +32,7 @@ import {
   SAMPLE_SOURCES,
 } from "../app/lib/sample";
 import { NewResearchForm } from "../app/components/research-form";
-import { CoverageDetails, ExploreLead, MarketOverview, OpportunityDetail, ReportWorkspace, SourceLink, type ResearchView } from "../app/components/report";
+import { BusinessIdeas, CoverageDetails, ExploreLead, TransferLeads, MarketOverview, OpportunityDetail, ReportWorkspace, SourceLink, type ResearchView } from "../app/components/report";
 import { Notice, ProgressPanel } from "../app/components/workspace";
 import Saved from "../app/routes/saved";
 
@@ -161,7 +161,7 @@ describe("workspace forms use real operations", () => {
     const parsed = parseResearchForm({ ...values, mode: "explore", query: "", categories: [] }, {});
     expect(parsed.input.mode).toBe("explore");
     expect(parsed.input.query).toBe("");
-    expect(parsed.input.categories).toHaveLength(12);
+    expect(parsed.input.categories).toHaveLength(21);
   });
   test("new workspaces use the dark precision theme by default", () => {
     expect(readSettings(db).appearance).toBe("dark");
@@ -218,7 +218,7 @@ describe("workspace forms use real operations", () => {
     );
     if (!(get instanceof Response)) expect(get.init?.status).toBe(405);
     const large = await workspaceAction(
-      request({ ...values, query: "a".repeat(70_000) }),
+      request({ ...values, query: "a".repeat(400_000) }),
       ["create"],
       undefined,
       db,
@@ -343,6 +343,59 @@ describe("workspace forms use real operations", () => {
   });
 });
 describe("rendered workspace state contracts", () => {
+  test("market transfer form reads only the source market and requires two different markets", () => {
+    const parsed = parseResearchForm({ ...values, mode: "transfer", query: "", categories: [], countries: "", sourceCountry: "us", targetCountry: "de" }, {});
+    expect(parsed.input).toMatchObject({ mode: "transfer", sourceCountry: "US", targetCountry: "DE", urls: [] });
+    expect(parsed.input.categories.length).toBeGreaterThan(1);
+    expect(parsed.settings.countries).toEqual(["US"]);
+    expect(() => parseResearchForm({ ...values, mode: "transfer", sourceCountry: "US", targetCountry: "US" }, {})).toThrow();
+  });
+
+  test("transfer leads show the target-market check and its limits", () => {
+    const html = render(<TransferLeads report={{ transfer: { sourceCountry: "US", targetCountry: "DE", checked: 4, available: 1, unavailable: 2, marketSpecific: 1, leads: [{ key: "apple:111", store: "apple", title: "Pantry Pal", developer: "Pantry Inc", url: "https://apps.apple.com/us/app/id111", ratingTotal: 5000, coreFunctionality: "Pantry inventory and meal planning", reason: "Not tied to the US.", barriers: ["Recipe content may need localization."], check: { state: "open", conclusion: "No suitable alternative found in this research", queries: [{ kind: "need", query: "vorrat app" }], alternatives: [], regionalVariants: [], unscreened: [] } }] } }} />);
+    expect(html).toContain("US apps not found in the DE storefront");
+    expect(html).toContain("No local alternative found");
+    expect(html).toContain("5,000 US ratings");
+    expect(html).toContain("vorrat app");
+    expect(html).toContain("cannot show demand");
+    expect(render(<TransferLeads report={{ exploration: null }} />)).toBe("");
+  });
+
+  test("a maximum-size pasted research answer is accepted and creates a business ideas run", async () => {
+    const ideas = Array.from({ length: 20 }, (_, index) => ({ name: `Idea ${index}`, summary: "s".repeat(390), official_url: `https://idea${index}.example/${"p".repeat(400)}`, source_urls: [`https://a${index}.example/${"q".repeat(400)}`, `https://b${index}.example/${"q".repeat(400)}`] }));
+    const findings = ideas.map((_, index) => ({ id: `idea-${index + 1}`, presence: "not_found", note: "n".repeat(390), equivalents: Array.from({ length: 4 }, (_, e) => ({ name: `Local ${e}`, url: `https://l${index}-${e}.example/${"r".repeat(400)}`, note: "c".repeat(390) })), source_urls: [] }));
+    const fence = (value: unknown) => `Long explanation. ${"x".repeat(20_000)}\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
+    const created = await workspaceAction(request({ ...values, mode: "ideas", query: "", countries: "", sourceCountry: "US", targetCountry: "DE", ideasResearch: fence({ ideas }), targetResearch: fence({ findings }) }), ["create"], undefined, db);
+    expect(created instanceof Response).toBe(true);
+    const run = listResearch(db)[0];
+    expect(run.input).toMatchObject({ mode: "ideas", sourceCountry: "US", targetCountry: "DE" });
+    expect((run.input.ideas as unknown[]).length).toBe(20); expect((run.input.targetFindings as unknown[]).length).toBe(20);
+    const missing = await workspaceAction(request({ ...values, mode: "ideas", sourceCountry: "US", targetCountry: "DE", ideasResearch: "no block" }), ["create"], undefined, db);
+    if (!(missing instanceof Response)) expect(missing.data.errors?.ideasResearch).toContain("No JSON block");
+  });
+
+  test("business ideas separate quoted page evidence from pasted claims", () => {
+    const html = render(<BusinessIdeas report={{ ideas: { sourceCountry: "US", targetCountry: "DE", leads: [
+      { id: "idea-1", name: "Pantry Club", officialUrl: "https://pantry.example/", status: "profiled", failures: [], profile: { whatItIs: "Refill grocery subscription.", howItWorks: ["Sign up"], pricing: "$29 per month", sourceMarketDependence: "none_evident", dependenceReason: "Not tied to the US.", barriers: [], uncertainty: [], evidence: [{ excerpt: "Members pay $29 per month.", url: "https://pantry.example/" }] }, market: { verdict: "none_reported", note: "Nothing comparable.", equivalents: [] } },
+      { id: "idea-2", name: "Ghost Kitchens", officialUrl: "javascript:alert(1)", summary: "Pasted claim only.", status: "failed", failures: [{ url: "https://x.example", reason: "http_404" }], profile: null, market: null },
+    ] } }} />);
+    expect(html).toContain("US businesses to consider for DE");
+    expect(html).toContain("No local equivalent reported");
+    expect(html).toContain("Members pay $29 per month.");
+    expect(html).toContain("The description is the pasted claim.");
+    expect(html).toContain("Target market not researched");
+    expect(html).not.toContain("javascript:");
+    expect(render(<BusinessIdeas report={{ transfer: null }} />)).toBe("");
+  });
+
+  test("a market-transfer survey reports listing progress instead of review counts", () => {
+    const html = render(<ProgressPanel progress={{ ...SAMPLE_PROGRESS, survey: { sampled: 12000, checked: 3400, missing: 210, screened: 50 } }} ceiling={1} />);
+    expect(html).toContain("Listings checked"); expect(html).toContain("3,400"); expect(html).toContain("12,000");
+    expect(html).toContain("Missing apps screened");
+    expect(html).not.toContain("Reviews collected");
+    expect(render(<ProgressPanel progress={SAMPLE_PROGRESS} ceiling={1} />)).toContain("Reviews collected");
+  });
+
   test("explore lead distinguishes observed competition from market proof", () => {
     const html = render(<ExploreLead report={{ exploration: { title: "Offline sleep journals", problem: "Record sleep without dependable connectivity.", audience: "People monitoring sleep in low-connectivity settings", observedAppCount: 4, observedDeveloperCount: 3, saturationSignal: "few competitors observed in this bounded sample", whyPromising: "The sampled cohort shows fragmented offline support.", uncertainty: ["The sample cannot establish market size or demand."] } }} />);
     expect(html).toContain("Explore result");
@@ -405,8 +458,8 @@ describe("rendered workspace state contracts", () => {
         }}
       />,
     );
-    expect(html.match(/aria-describedby="mode-error"/g)).toHaveLength(3);
-    expect(html.match(/aria-invalid="true"/g)).toHaveLength(4);
+    expect(html.match(/aria-describedby="mode-error"/g)).toHaveLength(5);
+    expect(html.match(/aria-invalid="true"/g)).toHaveLength(6);
     expect(html).toContain('aria-describedby="direction-hint direction-error"');
     expect(html).toContain('id="mode-error"');
     expect(html).toContain('id="direction-error"');

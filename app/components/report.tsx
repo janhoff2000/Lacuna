@@ -1082,6 +1082,266 @@ export function ExploreLead({ report }: { report?: JsonObject | null }) {
     </section>
   );
 }
+const TRANSFER_STATE: Record<string, { label: string; tone: string }> = {
+  open: { label: "No local alternative found", tone: "success" },
+  unscreened: { label: "Alternatives not screened", tone: "attention" },
+  incomplete: { label: "Search incomplete", tone: "attention" },
+  not_searched: { label: "Alternatives not searched", tone: "" },
+  unchecked: { label: "Absence not confirmed", tone: "attention" },
+  alternatives: { label: "Local alternatives exist", tone: "" },
+  regional_variant: { label: "Possible regional variant", tone: "" },
+  same_listing: { label: "Availability unreliable", tone: "attention" },
+};
+export function TransferLeads({ report }: { report?: JsonObject | null }) {
+  const transfer = obj(report?.transfer);
+  if (!str(transfer.targetCountry)) return null;
+  const leads = objects(transfer.leads);
+  const source = str(transfer.sourceCountry);
+  const target = str(transfer.targetCountry);
+  const listings = (title: string, items: JsonObject[]) =>
+    items.length > 0 && (
+      <p className="metadata">
+        {title}:{" "}
+        {items.map((item, index) => (
+          <span key={str(item.id)}>
+            {index > 0 && " · "}
+            {safeUrl(str(item.url)) ? (
+              <a href={safeUrl(str(item.url))} target="_blank" rel="noreferrer">
+                {str(item.title, str(item.appId))}
+              </a>
+            ) : (
+              str(item.title, str(item.appId))
+            )}
+          </span>
+        ))}
+      </p>
+    );
+  return (
+    <section className="explore-lead" aria-labelledby="transfer-leads-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Market transfer</p>
+          <h2 id="transfer-leads-title">
+            {`${source} apps not found in the ${target} storefront`}
+          </h2>
+        </div>
+        <span className="metadata">
+          {num(transfer.found) > leads.length
+            ? `${leads.length} of ${num(transfer.found)} leads listed · not market proof`
+            : "Leads to investigate · not market proof"}
+        </span>
+      </div>
+      <dl className="explore-facts transfer-facts">
+        <div><dt>Apps checked</dt><dd>{num(transfer.checked)}</dd></div>
+        <div><dt>Already in {target}</dt><dd>{num(transfer.available)}</dd></div>
+        <div><dt>Not found in {target}</dt><dd>{num(transfer.unavailable)}</dd></div>
+        <div><dt>Tied to {source} only</dt><dd>{num(transfer.marketSpecific)}</dd></div>
+      </dl>
+      {leads.length ? (
+        <ol className="transfer-list">
+          {leads.map((lead) => {
+            const check = obj(lead.check);
+            const state = TRANSFER_STATE[str(lead.state, str(check.state))] ?? TRANSFER_STATE.incomplete;
+            const url = safeUrl(str(lead.url));
+            return (
+              <li key={str(lead.key)}>
+                <div className="transfer-heading">
+                  <h3>
+                    {url ? (
+                      <a href={url} target="_blank" rel="noreferrer">{str(lead.title)}</a>
+                    ) : (
+                      str(lead.title)
+                    )}
+                  </h3>
+                  <span className={`badge ${state.tone}`}>{state.label}</span>
+                </div>
+                <p className="metadata">
+                  {[
+                    storeLabel(str(lead.store)),
+                    str(lead.developer),
+                    str(lead.category),
+                    typeof lead.ratingTotal === "number"
+                      ? `${lead.ratingTotal.toLocaleString("en")} ${source} ratings`
+                      : "",
+                    str(lead.released) ? `Released ${date(str(lead.released))}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+                <p>{str(lead.coreFunctionality) || str(lead.reason)}</p>
+                {str(lead.coreFunctionality) && (
+                  <p className="muted">{str(lead.reason)}</p>
+                )}
+                {str(check.conclusion) && <p className="muted">{str(check.conclusion)}.</p>}
+                {listings("Same name or developer", objects(check.regionalVariants))}
+                {listings(`Alternatives in ${target}`, objects(check.alternatives))}
+                {listings("Not screened", objects(check.unscreened))}
+                {strings(lead.barriers).length > 0 && (
+                  <details>
+                    <summary>Possible reasons it is absent</summary>
+                    <ul className="plain-list">
+                      {strings(lead.barriers).map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </details>
+                )}
+                {objects(check.queries).length > 0 && (
+                  <details>
+                    <summary>Searches run in {target}</summary>
+                    <ul className="plain-list">
+                      {objects(check.queries).map((query, index) => (
+                        <li key={index}>
+                          {str(query.kind) === "same_product" ? "Same product" : "Same job"}: “{str(query.query)}”
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <Notice title="No transfer leads in this sample">
+          <p>
+            Every sampled app was already listed in {target}, tied to {source},
+            or could not be checked. Try other categories or a deeper run.
+          </p>
+        </Notice>
+      )}
+      <Notice title="What this check cannot establish">
+        <ul className="plain-list">
+          <li>Absence is tested by app ID in one storefront; a renamed local edition or a web-only competitor would not be detected.</li>
+          <li>A Google Play listing can be visible in {target} without being installable there, so some gaps may be missed.</li>
+          <li>Store searches are bounded samples. They cannot show demand, market size, or that no competitor exists.</li>
+        </ul>
+      </Notice>
+    </section>
+  );
+}
+const IDEA_VERDICT: Record<string, { label: string; tone: string }> = {
+  none_reported: { label: "No local equivalent reported", tone: "success" },
+  equivalent_unconfirmed: { label: "Equivalent reported, unconfirmed", tone: "attention" },
+  not_researched: { label: "Target market not researched", tone: "" },
+  reported_present: { label: "Reported as already present", tone: "" },
+  equivalent_confirmed: { label: "Local equivalent confirmed", tone: "" },
+};
+const IDEA_STATUS: Record<string, string> = {
+  no_sources: "None of the pasted sources could be read, so nothing below is verified.",
+  not_profiled: "Sources were fetched but not analysed. The description is the pasted claim.",
+  fetched: "Sources were fetched but not analysed. The description is the pasted claim.",
+  failed: "The analysis failed source validation. The description is the pasted claim.",
+  pending: "This idea was not processed.",
+};
+export function BusinessIdeas({ report }: { report?: JsonObject | null }) {
+  const ideas = obj(report?.ideas);
+  if (!str(ideas.targetCountry)) return null;
+  const source = str(ideas.sourceCountry);
+  const target = str(ideas.targetCountry);
+  const leads = objects(ideas.leads);
+  const link = (url: string, label: string) =>
+    safeUrl(url) ? (
+      <a href={safeUrl(url)} target="_blank" rel="noreferrer">{label}</a>
+    ) : (
+      label
+    );
+  const fact = (label: string, value: string) =>
+    value && (
+      <p>
+        <strong>{label}:</strong> {value}
+      </p>
+    );
+  return (
+    <section className="explore-lead" aria-labelledby="business-ideas-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Business ideas</p>
+          <h2 id="business-ideas-title">{`${source} businesses to consider for ${target}`}</h2>
+        </div>
+        <span className="metadata">From your pasted research · not market proof</span>
+      </div>
+      <ol className="transfer-list">
+        {leads.map((lead) => {
+          const profile = obj(lead.profile);
+          const market = obj(lead.market);
+          const verdict = IDEA_VERDICT[str(market.verdict, "not_researched")] ?? IDEA_VERDICT.not_researched;
+          const profiled = str(lead.status) === "profiled";
+          return (
+            <li key={str(lead.id)}>
+              <div className="transfer-heading">
+                <h3>{link(str(lead.officialUrl), str(lead.name))}</h3>
+                <span className={`badge ${verdict.tone}`}>{verdict.label}</span>
+              </div>
+              {profiled ? (
+                <>
+                  <p>{str(profile.whatItIs)}</p>
+                  {fact("Customer", str(profile.customer))}
+                  <ol className="idea-steps">
+                    {strings(profile.howItWorks).map((step) => <li key={step}>{step}</li>)}
+                  </ol>
+                  {fact("Revenue model", str(profile.revenueModel))}
+                  {fact("Pricing", str(profile.pricing))}
+                  {fact("Traction", str(profile.traction))}
+                  {fact(`Dependence on ${source}`, `${str(profile.sourceMarketDependence).replace("_", " ")} — ${str(profile.dependenceReason)}`)}
+                </>
+              ) : (
+                <>
+                  <p>{str(lead.summary) || "No description was pasted."}</p>
+                  <p className="muted">{IDEA_STATUS[str(lead.status)] ?? IDEA_STATUS.pending}</p>
+                </>
+              )}
+              {str(market.note) && <p className="muted">Pasted finding for {target}: {str(market.note)}</p>}
+              {objects(market.equivalents).length > 0 && (
+                <ul className="plain-list">
+                  {objects(market.equivalents).map((equivalent, index) => (
+                    <li key={index}>
+                      {link(str(equivalent.url), str(equivalent.name))} ·{" "}
+                      {str(equivalent.fit) === "core"
+                        ? "confirmed from its page as the same job"
+                        : str(equivalent.fit)
+                          ? "its page describes a different job"
+                          : "not confirmed from its page"}
+                      {str(equivalent.reason) && ` — ${str(equivalent.reason)}`}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {profiled && objects(profile.evidence).length > 0 && (
+                <details>
+                  <summary>Quoted evidence</summary>
+                  {objects(profile.evidence).map((item, index) => (
+                    <blockquote className="idea-evidence" key={index}>
+                      “{str(item.excerpt)}” — {link(str(item.url), "source")}
+                    </blockquote>
+                  ))}
+                </details>
+              )}
+              {profiled && strings(profile.barriers).length + strings(profile.uncertainty).length > 0 && (
+                <details>
+                  <summary>Possible barriers and open questions</summary>
+                  <ul className="plain-list">
+                    {[...strings(profile.barriers), ...strings(profile.uncertainty)].map((item) => <li key={item}>{item}</li>)}
+                  </ul>
+                </details>
+              )}
+              {objects(lead.failures).length > 0 && (
+                <p className="metadata">
+                  {objects(lead.failures).length} pasted {objects(lead.failures).length === 1 ? "source" : "sources"} could not be read.
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      <Notice title="What this cannot establish">
+        <ul className="plain-list">
+          <li>The list of ideas and every target-market finding come from research you ran elsewhere. Lacuna only verified what the fetched pages say.</li>
+          <li>“No local equivalent reported” means the pasted research named none. Lacuna cannot tell how thorough that search was.</li>
+          <li>Company pages describe themselves favourably. Nothing here shows demand, market size or legal feasibility in {target}.</li>
+        </ul>
+      </Notice>
+    </section>
+  );
+}
 export function CoverageDetails({ view }: { view: ResearchView }) {
   const gaps = Array.isArray(view.run.coverageDetails.gaps)
     ? objects(view.run.coverageDetails.gaps)

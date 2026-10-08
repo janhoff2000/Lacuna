@@ -4,20 +4,31 @@ import { transaction, type DB } from "./db";
 import { analyze, AiPaused, type AiTransport } from "./ai";
 import { appleAdapter } from "./collectors/apple";
 import { googleAdapter } from "./collectors/google";
-import { COLLECTOR_VERSION, collectionFailure, hash, parseStoreUrl, planLocales, type Listing, type Locale, type StoreAdapter, type WrittenReview } from "./collectors/common";
-import { collectWebsite, type WebResult } from "./collectors/web";
+import { CHART_COLLECTIONS, COLLECTOR_VERSION, collectionFailure, hash, listingMissing, parseStoreUrl, planLocales, type Listing, type Locale, type StoreAdapter, type WrittenReview } from "./collectors/common";
+import { collectWebsite, type WebPage, type WebResult } from "./collectors/web";
+import type { PastedIdea, Presence } from "../shared/ideas";
+import { knownScreening, recordAvailability, recordListing, recordScreening, recordSummary } from "./catalog";
 import { collectionRequestCount, parseCollectionCheckpoint, replaceCollectionTask } from "./collections";
 import { allocateReviews, collectionReuse, equalShares, evidenceConfidence, FRESHNESS, LIMITS, metadataCandidates, pageStop, POLICY_VERSION, PRESETS, sampleReviews, selectCandidates, type Candidate } from "./policy";
-import { researchInputSchema, researchSettings, searchIntents } from "./research-input";
+import { broadDiscovery, researchInputSchema, researchSettings, searchIntents } from "./research-input";
 import { assertAttempt, checkpointTask, getRun, markCoverage, type RunRow, type TaskRow } from "./runs";
 import { disqualifyReview, reviewDisqualified, saveSource, type SourceSnapshot } from "./sources";
-import { findingSchema, schemas, themeSchema, validateCitations, validateStageLinks, type Finding, type ProposedOpportunity, type QuoteSource } from "./prompts";
+import { findingSchema, PROMPT_VERSION, schemas, themeSchema, transferVerdict, validateCitations, validateStageLinks, type Finding, type ProposedOpportunity, type QuoteSource, type TransferVerdict } from "./prompts";
 import type { Handlers, StagePlanner } from "./pipeline";
 
 const json = (value: unknown): JsonObject => decodeObject(encodeJson(value));
-export interface CandidateRecord extends Candidate { sourceId: string; title: string; language: string; removed?: boolean; cohortFit?: "core" | "adjacent" | "unrelated"; coreFunctionality?: string }
-interface Seed extends Locale { store: Store; appId: string; rank: number; intent: string; origins: string[]; included: boolean }
-interface DiscoveryState { seeds: Seed[]; candidates: CandidateRecord[]; selected: CandidateRecord[]; completed: string[]; lookups: number; developerCapRelaxed: boolean; exploration?: JsonObject; additions?: { key: string; reservationId: string; processInstanceId?: string }[]; requests?: { key: string; store: Store; country: string; language: string; intent: string; ids: string[]; request: JsonObject }[] }
+export interface CandidateRecord extends Candidate { sourceId: string; title: string; language: string; removed?: boolean; cohortFit?: "core" | "adjacent" | "unrelated"; coreFunctionality?: string; targetAvailability?: TargetAvailability; transferFit?: "transferable" | "market_specific" | "unclear"; targetSearchTerms?: string[]; barriers?: string[]; targetCheckedAt?: number }
+export type TargetAvailability = "available" | "unavailable" | "unknown";
+interface Seed extends Locale { store: Store; appId: string; rank: number; intent: string; origins: string[]; included: boolean; targetAvailability?: TargetAvailability; targetCheckedAt?: number }
+interface DiscoveryState { seeds: Seed[]; candidates: CandidateRecord[]; selected: CandidateRecord[]; completed: string[]; lookups: number; developerCapRelaxed: boolean; exploration?: JsonObject; transfer?: JsonObject; ideas?: IdeaRecord[]; additions?: { key: string; reservationId: string; processInstanceId?: string }[]; requests?: { key: string; store: Store; country: string; language: string; intent: string; ids: string[]; request: JsonObject }[] }
+// "pending" until its pasted sources were fetched and "fetched" until profiling settled, so a run paused
+// mid-profile resumes that idea. A profile exists only when its literal citations validated.
+export interface IdeaRecord extends PastedIdea { pages: { url: string; official: boolean; sourceId: string }[]; failures: { url: string; reason: string }[]; profile: JsonObject | null; status: "pending" | "fetched" | "profiled" | "no_sources" | "not_profiled" | "failed" }
+export interface IdeaMarket {
+  id: string; presence: Presence | null; note: string; urls: string[];
+  equivalents: { name: string; url: string | null; note: string; sourceId: string | null; fit: "core" | "adjacent" | "unrelated" | null; reason: string }[];
+  verdict: "none_reported" | "equivalent_unconfirmed" | "not_researched" | "reported_present" | "equivalent_confirmed";
+}
 export interface SourceRow { id: string; store: Store | null; app_id: string | null; review_id: string | null; kind: string; url: string; payload_json: string; captured_at: number; logical_review_key?: string | null; provenance_json?: string; task_id?: string }
 export interface ResearchDependencies { apple?: StoreAdapter; google?: StoreAdapter; website?: typeof collectWebsite; aiTransport?: AiTransport; aiConfigured?: boolean; now?: () => number }
 
@@ -84,12 +95,230 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
   const website = dependencies.website ?? collectWebsite; const now = dependencies.now ?? Date.now;
   const aiOptions = { transport: dependencies.aiTransport, configured: dependencies.aiConfigured };
 
+  // Pasted research is fetched one page per third-party URL; only the company's own site may be followed further.
+  const savePages = (task: TaskRow, pages: WebPage[], provenance: JsonObject): string[] => pages.map(page => saveSource(db, task.run_id, task.id, "website-v1", { kind: "website", url: page.url, locale: "", payload: json(page), capturedAt: page.capturedAt }, { userSupplied: true, pastedResearch: true, ...provenance }));
+  const pageQuote = (sourceId: string): QuoteSource => { const row = sourceById(db, sourceId); return { id: row.id, text: String(decodeObject(row.payload_json).text ?? ""), kind: "website", url: row.url, provenance: "user_website" }; };
+  const profileIdeas = async (task: TaskRow, signal: AbortSignal, run: RunRow, input: ReturnType<typeof researchInputSchema.parse>): Promise<JsonObject> => {
+    const state = discoveryState(db, run.id);
+    const ideas = state.ideas ??= input.ideas!.map(idea => ({ ...idea, pages: [], failures: [], profile: null, status: "pending" as const }));
+    const save = () => checkpointTask(db, task.id, task.attempt_id!, json(state), undefined, now());
+    for (const idea of ideas) {
+      if (idea.status === "pending") {
+        idea.pages = []; idea.failures = [];
+        const fetched: { page: WebPage; official: boolean }[] = [];
+        for (const request of [...(idea.officialUrl ? [{ url: idea.officialUrl, official: true, pages: 2 }] : []), ...idea.urls.map(url => ({ url, official: false, pages: 1 }))]) {
+          signal.throwIfAborted();
+          const result = await website(request.url, signal, undefined, request.pages);
+          fetched.push(...result.pages.map(page => ({ page, official: request.official })));
+          idea.failures.push(...result.failures.filter(failure => failure.reason !== "readable_text_limit").map(failure => ({ url: failure.url, reason: failure.reason })));
+        }
+        transaction(db, () => {
+          assertAttempt(db, task.id, task.attempt_id!);
+          for (const { page, official } of fetched) idea.pages.push({ url: page.url, official, sourceId: savePages(task, [page], { ideaId: idea.id, official })[0] });
+          idea.status = idea.pages.length ? "fetched" : "no_sources";
+          db.query("UPDATE tasks SET checkpoint_json=? WHERE id=?").run(encodeJson(state), task.id);
+        });
+        for (const failure of idea.failures) gap(db, run.id, `idea:${idea.id}:${failure.url}`, "A pasted source could not be read; claims that rest on it stay unverified");
+      }
+      if (idea.status !== "fetched") continue;
+      if (aiOptions.configured === false) { idea.status = "not_profiled"; save(); gap(db, run.id, "idea_profiles", "Business profiles need AI analysis; fetched sources were kept without a profile"); continue; }
+      try {
+        const quotes = idea.pages.map(page => pageQuote(page.sourceId));
+        const pages = idea.pages.map((page, index) => ({ sourceId: page.sourceId, url: page.url, official: page.official, text: quotes[index].text.slice(0, 12_000) }));
+        idea.profile = json(await analyze(db, task, "business_profile", { sourceCountry: input.sourceCountry, targetCountry: input.targetCountry, name: idea.name, pastedSummary: idea.summary, pages }, quotes, signal, aiOptions));
+        idea.status = "profiled";
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+        idea.status = "failed"; gap(db, run.id, `idea:${idea.id}:profile`, "A business profile failed literal-source validation; its fetched sources were kept");
+      }
+      save();
+    }
+    return json({ ...state, noMatchingApps: false, unusedSlots: 0, intents: [] });
+  };
+  const checkIdeaMarkets = async (task: TaskRow, signal: AbortSignal, run: RunRow, input: ReturnType<typeof researchInputSchema.parse>): Promise<JsonObject> => {
+    let checkpoint = decodeObject(task.checkpoint_json); const markets = (checkpoint.markets ?? []) as unknown as IdeaMarket[];
+    for (const idea of discoveryState(db, run.id).ideas ?? []) {
+      if (markets.some(market => market.id === idea.id)) continue;
+      const finding = input.targetFindings?.find(finding => finding.id === idea.id);
+      const market: IdeaMarket = { id: idea.id, presence: finding?.presence ?? null, note: finding?.note ?? "", urls: finding?.urls ?? [], equivalents: [], verdict: "not_researched" };
+      const texts = new Map<string, string>(); const pages: (WebPage | null)[] = [];
+      for (const equivalent of finding?.equivalents ?? []) {
+        signal.throwIfAborted();
+        const result = equivalent.url ? await website(equivalent.url, signal, undefined, 1) : null;
+        pages.push(result?.pages[0] ?? null);
+        if (result && !result.pages.length) gap(db, run.id, `idea:${idea.id}:${equivalent.url}`, "A reported local equivalent could not be read and stays unconfirmed");
+        market.equivalents.push({ ...equivalent, sourceId: null, fit: null, reason: "" });
+      }
+      transaction(db, () => {
+        assertAttempt(db, task.id, task.attempt_id!);
+        pages.forEach((page, index) => { if (page) { const sourceId = savePages(task, [page], { ideaId: idea.id, targetMarket: true })[0]; market.equivalents[index].sourceId = sourceId; texts.set(sourceId, page.text); } });
+      });
+      const readable = market.equivalents.filter(equivalent => equivalent.sourceId);
+      if (readable.length && aiOptions.configured !== false) try {
+        const scope = { mode: "topic", query: typeof idea.profile?.whatItIs === "string" ? idea.profile.whatItIs : `${idea.name}. ${idea.summary}`, categories: [], urls: [], websiteUrls: [] };
+        const screened = await analyze(db, task, "screening", { scope, candidates: readable.map((equivalent, index) => ({ index, title: equivalent.name, category: null, description: texts.get(equivalent.sourceId!)!.slice(0, 1500), store: "website", discoveryOrigins: [] })) }, [], signal, aiOptions);
+        for (const result of screened.candidates) { readable[result.candidateIndex].fit = result.fit; readable[result.candidateIndex].reason = result.reason; }
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+        gap(db, run.id, `idea:${idea.id}:equivalents`, "Reported local equivalents could not be screened for the same job");
+      }
+      // Lacuna cannot see how complete the outside research was, so an empty list is only ever "none reported".
+      market.verdict = !finding ? "not_researched" : finding.presence === "operates" || finding.presence === "announced" ? "reported_present"
+        : market.equivalents.some(equivalent => equivalent.fit === "core") ? "equivalent_confirmed" : market.equivalents.length ? "equivalent_unconfirmed" : "none_reported";
+      markets.push(market); checkpoint = json({ ...checkpoint, markets }); checkpointTask(db, task.id, task.attempt_id!, checkpoint);
+    }
+    return json({ checks: [], counterparts: [], markets });
+  };
+
+  // A market-transfer survey keeps its sample in transfer_listings instead of the
+  // checkpoint. Each step only picks up rows that have not reached it yet, so a
+  // paused or interrupted run continues where it stopped.
+  const surveyTransfer = async (task: TaskRow, signal: AbortSignal, run: RunRow, input: ReturnType<typeof researchInputSchema.parse>): Promise<JsonObject> => {
+    const settings = researchSettings(decodeObject(run.settings_json)); const state = discoveryState(db, run.id);
+    const source = planLocales("apple", [input.sourceCountry!])[0]; const target = planLocales("apple", [input.targetCountry!])[0]; const market = target.country;
+    const enabled = settings.stores as Store[]; const limit = Number(settings.surveyLimit);
+    const save = () => checkpointTask(db, task.id, task.attempt_id!, json(state), undefined, now());
+    const guarded = (write: () => void) => transaction(db, () => { assertAttempt(db, task.id, task.attempt_id!); write(); });
+    const count = (where = "1=1") => db.query<{ n: number }, [string]>(`SELECT COUNT(*) AS n FROM transfer_listings WHERE run_id=? AND ${where}`).get(run.id)!.n;
+    const pending = (store: Store, where: string, size: number) => db.query<{ app_id: string }, [string, Store, number]>(`SELECT app_id FROM transfer_listings WHERE run_id=? AND store=? AND ${where} ORDER BY rank,category,app_id LIMIT ?`).all(run.id, store, size).map(row => row.app_id);
+    const update = (store: Store, appId: string, assignments: string, ...values: (string | number | null)[]) => db.query(`UPDATE transfer_listings SET ${assignments} WHERE run_id=? AND store=? AND app_id=?`).run(...values, run.id, store, appId);
+
+    // Every chart is read before the sample is cut, so a small survey still spans all chosen categories and chart types.
+    for (const collection of CHART_COLLECTIONS) for (const category of input.categories) for (const store of enabled) {
+      const id = category[store]; if (!id) continue;
+      const key = `chart:${id}:${store}:${source.country}:${collection}`;
+      if (state.completed.includes(key)) continue;
+      signal.throwIfAborted();
+      try {
+        const rows = (await stores[store].chart(id, source, signal, { collection, limit: LIMITS.transferChartResults })).slice(0, LIMITS.transferChartResults);
+        guarded(() => rows.forEach((listing, rank) => {
+          // Whatever the store returned is kept in the catalog, including apps beyond this survey's size.
+          recordListing(db, listing, listing.capturedAt); recordAvailability(db, store, listing.appId, source.country, "available", listing.capturedAt);
+          // An app keeps its best chart position.
+          db.query("INSERT INTO transfer_listings(run_id,store,app_id,category,chart,rank) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,store,app_id) DO UPDATE SET category=excluded.category,chart=excluded.chart,rank=excluded.rank WHERE excluded.rank<transfer_listings.rank").run(run.id, store, listing.appId, category.label, collection, rank);
+        }));
+      } catch { signal.throwIfAborted(); gap(db, run.id, key, "Store discovery unavailable for the requested scope"); }
+      state.completed.push(key); save();
+    }
+    if (!state.completed.includes("survey:sized")) {
+      // Keep the best-ranked apps across all charts; ties alternate between charts, categories and stores.
+      guarded(() => db.query("DELETE FROM transfer_listings WHERE run_id=?1 AND (store,app_id) NOT IN (SELECT store,app_id FROM transfer_listings WHERE run_id=?1 ORDER BY rank,chart,category,store,app_id LIMIT ?2)").run(run.id, limit));
+      state.completed.push("survey:sized"); save();
+    }
+
+    for (const store of enabled) {
+      // A fresh earlier answer for this storefront settles an app without a request.
+      guarded(() => db.query(`UPDATE transfer_listings SET cached=1,
+          availability=(SELECT a.status FROM app_availability a WHERE a.store=transfer_listings.store AND a.app_id=transfer_listings.app_id AND a.country=?1),
+          checked_at=(SELECT a.checked_at FROM app_availability a WHERE a.store=transfer_listings.store AND a.app_id=transfer_listings.app_id AND a.country=?1)
+        WHERE run_id=?2 AND store=?3 AND availability='pending' AND EXISTS(SELECT 1 FROM app_availability a WHERE a.store=transfer_listings.store AND a.app_id=transfer_listings.app_id AND a.country=?1
+          AND a.checked_at<=?4 AND ?4-a.checked_at < CASE a.status WHEN 'available' THEN ?5 ELSE ?6 END)`).run(market, run.id, store, now(), FRESHNESS.availableMs, FRESHNESS.unavailableMs));
+      const bulk = stores[store].availability; const size = bulk ? LIMITS.transferBatch : 1; let failures = 0;
+      for (;;) {
+        signal.throwIfAborted();
+        const group = pending(store, "availability='pending'", size); if (!group.length) break;
+        // A store that keeps failing is rate limiting or down; asking on would only turn the rest into unknowns.
+        if (failures >= (bulk ? LIMITS.transferBatchFailures : LIMITS.transferSingleFailures)) { gap(db, run.id, `availability:${store}`, "The store stopped answering availability checks; the remaining sampled apps were left unchecked"); break; }
+        // Only an explicit not-found is absence; any other failure must never read as a gap.
+        let outcome: (appId: string) => TargetAvailability = () => "unknown";
+        try {
+          if (bulk) {
+            const listed = await bulk(group, target, signal);
+            // An empty answer for a whole batch is far more likely a throttled or broken response than a batch of gaps.
+            if (group.length > 1 && !listed.size) throw new Error("empty_bulk_answer");
+            outcome = appId => listed.has(appId) ? "available" : "unavailable";
+          }
+          else { await stores[store].details(group[0], target, signal); outcome = () => "available"; }
+        } catch (error) { signal.throwIfAborted(); if (!bulk && listingMissing(error)) outcome = () => "unavailable"; }
+        failures = group.every(appId => outcome(appId) === "unknown") ? failures + 1 : 0;
+        guarded(() => { for (const appId of group) { const result = outcome(appId); if (result !== "unknown") recordAvailability(db, store, appId, market, result, now()); update(store, appId, "availability=?,checked_at=?", result, now()); } });
+      }
+    }
+    if (count("availability='unknown'")) gap(db, run.id, "availability_unknown", "Target-market availability could not be established for some sampled apps; none of them were treated as missing");
+
+    for (const store of enabled) {
+      const bulk = stores[store].detailsMany; const size = bulk ? LIMITS.transferBatch : 1; let failures = 0;
+      for (;;) {
+        signal.throwIfAborted();
+        const group = pending(store, "availability='unavailable' AND source_id IS NULL AND fit IS NULL", size); if (!group.length) break;
+        if (failures >= (bulk ? LIMITS.transferBatchFailures : LIMITS.transferSingleFailures)) { gap(db, run.id, `details:${store}`, "The store stopped answering listing requests; some apps missing from the target storefront have no details"); break; }
+        const listings = new Map<string, Listing>();
+        for (const appId of group) {
+          const cached = db.query<SourceRow & { observed_at: number }, [Store, string, string, number]>("SELECT s.*,rs.observed_at FROM sources s JOIN run_sources rs ON rs.source_id=s.id WHERE s.kind='listing' AND s.store=? AND s.app_id=? AND s.locale=? AND rs.observed_at>=? ORDER BY rs.observed_at DESC LIMIT 1").get(store, appId, `${source.country}:${source.language}`, now() - FRESHNESS.catalogListingMs);
+          if (cached) listings.set(appId, { ...decodeObject(cached.payload_json), request: { reusedSourceId: cached.id, observedAt: cached.observed_at }, capturedAt: cached.observed_at } as unknown as Listing);
+        }
+        const wanted = group.filter(appId => !listings.has(appId)); let answered = !wanted.length;
+        if (wanted.length) try {
+          for (const listing of bulk ? await bulk(wanted, source, signal) : [await stores[store].details(wanted[0], source, signal)]) if (wanted.includes(listing.appId)) listings.set(listing.appId, listing);
+          answered = true;
+        } catch { signal.throwIfAborted(); }
+        failures = answered ? 0 : failures + 1;
+        // An app the source store no longer returns is not a lead: its absence elsewhere means nothing.
+        guarded(() => { for (const appId of group) { const listing = listings.get(appId); if (listing) update(store, appId, "source_id=?", persistSnapshot(db, task, "listing", listing)); else if (answered) update(store, appId, "fit='no_details'"); } });
+        if (!answered && !bulk) guarded(() => update(store, group[0], "fit='no_details'"));
+      }
+    }
+
+    if (count("fit='no_details'")) gap(db, run.id, "details_missing", "Details could not be read for some apps missing from the target storefront; they are not listed as leads");
+    const scope = { sourceCountry: input.sourceCountry!, targetCountry: market, targetLanguage: target.language, focus: input.query || null };
+    const settle = (store: Store, appId: string, verdict: TransferVerdict) => update(store, appId, "fit=?,assessment_json=?", verdict.fit, encodeJson(verdict));
+    for (let round = 0; ; round++) {
+      signal.throwIfAborted();
+      const batch = db.query<{ store: Store; app_id: string; source_id: string }, [string]>("SELECT store,app_id,source_id FROM transfer_listings WHERE run_id=? AND availability='unavailable' AND source_id IS NOT NULL AND fit IS NULL ORDER BY rank,store,app_id LIMIT 25").all(run.id);
+      if (!batch.length) break;
+      const entries = batch.map(row => {
+        const listing = listingById(db, row.source_id);
+        const content = { title: listing.title, developer: listing.developer, category: listing.category ?? null, description: listing.description.slice(0, 1500), store: listing.store };
+        return { row, content, key: { store: row.store, appId: row.app_id, sourceCountry: scope.sourceCountry, targetCountry: market, inputHash: hash({ content, scope, model: settings.model, prompt: PROMPT_VERSION }) } };
+      });
+      // An earlier verdict on the same listing text, scope, model and prompt is reused instead of paid for again.
+      const fresh = entries.filter(entry => {
+        const stored = transferVerdict.safeParse(knownScreening(db, entry.key));
+        if (stored.success) guarded(() => settle(entry.row.store, entry.row.app_id, stored.data));
+        return !stored.success;
+      });
+      if (!fresh.length) continue;
+      const unscreened = () => guarded(() => { for (const { row } of fresh) update(row.store, row.app_id, "fit='unscreened'"); });
+      if (aiOptions.configured === false) { unscreened(); gap(db, run.id, "transfer_screening", "Transferability screening needs AI analysis; missing apps were kept unscreened"); continue; }
+      try {
+        const screened = await analyze(db, task, "transfer", { ...scope, candidates: fresh.map((entry, index) => ({ index, ...entry.content })) }, [], signal, aiOptions);
+        guarded(() => {
+          for (const { candidateIndex, ...result } of screened.candidates) {
+            const { row, key } = fresh[candidateIndex];
+            settle(row.store, row.app_id, result); recordScreening(db, key, json(result), now()); recordSummary(db, key.store, key.appId, result.coreFunctionality);
+          }
+        });
+      } catch (error) {
+        if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+        unscreened(); gap(db, run.id, `transfer_screening:${round}`, "Transferability screening failed validation; missing apps were kept unscreened");
+      }
+    }
+
+    // The target-market search is the expensive step, so it goes to the leads with the most source-market ratings.
+    state.candidates = transferLeadRows(db, run.id, settings.exploreAppLimit).map(row => {
+      const verdict = transferVerdict.safeParse(row.assessment_json ? decodeObject(row.assessment_json) : null).data; const listing = decodeObject(row.payload_json) as unknown as Listing;
+      return { store: row.store, appId: row.app_id, developerId: listing.developerId, intent: row.category, country: source.country, language: source.language, rank: row.rank, included: false, origins: [`chart:${row.chart}`], sourceId: row.source_id, title: listing.title,
+        relevance: verdict ? "direct" as const : "adjacent" as const, cohortFit: verdict ? "core" as const : "adjacent" as const, reason: verdict?.reason ?? `Not found in the ${market} storefront; dependence on the source market was not screened.`,
+        targetAvailability: "unavailable" as const, ...(row.checked_at === null ? {} : { targetCheckedAt: row.checked_at }),
+        ...(verdict ? { transferFit: verdict.fit, coreFunctionality: verdict.coreFunctionality, targetSearchTerms: verdict.targetSearchTerms, barriers: verdict.barriers } : {}) };
+    });
+    state.selected = state.candidates;
+    if (count("availability='pending'")) gap(db, run.id, "availability_limit", "Some sampled apps were not checked in the target storefront");
+    state.transfer = json({ sourceCountry: input.sourceCountry, targetCountry: market, targetLanguage: target.language, sampled: count(), checked: count("availability!='pending'"), available: count("availability='available'"), unavailable: count("availability='unavailable'"), unknown: count("availability='unknown'"), unchecked: count("availability='pending'"), cached: count("cached=1"), transferable: count("fit='transferable'"), marketSpecific: count("fit='market_specific'") });
+    save();
+    return json({ ...state, noMatchingApps: false, unusedSlots: settings.exploreAppLimit - state.selected.length, intents: [] });
+  };
+
   const discover = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
     const run = getRun(db, task.run_id); const settings = researchSettings(decodeObject(run.settings_json)); const input = researchInputSchema.parse(decodeObject(run.input_json));
+    if (input.mode === "ideas") return profileIdeas(task, signal, run, input);
+    if (input.mode === "transfer") return surveyTransfer(task, signal, run, input);
     const state = discoveryState(db, run.id); const intents = searchIntents(input, settings.preset);
     const enabled = settings.stores as Store[]; const locales = settings.countries.map(country => planLocales("apple", [country])[0]);
-    const metadataLimit = input.mode === "explore" ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
-    const appLimit = input.mode === "explore" ? settings.exploreAppLimit : settings.appLimit;
+    const broad = broadDiscovery(input.mode);
+    const metadataLimit = broad ? settings.discoveryLimit : PRESETS[settings.preset].metadataLookups;
+    const appLimit = broad ? settings.exploreAppLimit : settings.appLimit;
+    // Explore keeps allowance for its niche searches.
     const broadLimit = input.mode === "explore" ? Math.max(2, Math.floor(metadataLimit * 0.6)) : metadataLimit;
     const save = (write?: () => void) => checkpointTask(db, task.id, task.attempt_id!, json(state), write, now());
     for (const url of input.urls) { const reference = parseStoreUrl(url); addSeed(state, { ...reference, country: reference.country ?? settings.countries[0], language: "en", rank: -1, intent: input.query || "Explicit inclusion", included: true, origins: [`included:${url}`] }); }
@@ -107,6 +336,8 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
         const bounded = found.slice(0, request.category ? LIMITS.chartResults : LIMITS.searchResults);
         (state.requests ??= []).push({ key: request.key, store: request.store, ...request.locale, intent: request.intent, ids: bounded.map(listing => listing.appId), request: bounded[0]?.request ?? { country: request.locale.country, language: request.locale.language, query: request.intent, category: request.category ?? null } });
         bounded.forEach((listing, rank) => addSeed(state, { ...request.locale, store: request.store, appId: listing.appId, intent: request.intent, rank, origins: [request.key], included: false }));
+        // Whatever the store returned is kept in the catalog, including apps this run never looks up.
+        transaction(db, () => { for (const listing of bounded) { recordListing(db, listing, listing.capturedAt); recordAvailability(db, listing.store, listing.appId, request.locale.country, "available", listing.capturedAt); } });
         const included = state.seeds.filter(seed => seed.included);
         const pool = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting listing details" })), settings.preset, broadLimit);
         const retained = new Set([...included, ...pool].slice(0, broadLimit).map(candidateKey));
@@ -116,10 +347,11 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     }
     const lookup = async (seed: Seed, limit = metadataLimit) => {
       const key = `details:${candidateKey(seed)}`;
-      if (state.completed.includes(key) || state.lookups >= limit) return;
-      state.lookups++; save();
+      if (state.completed.includes(key)) return;
+      // Reusing a recently captured listing page costs no lookup allowance.
+      const cached = db.query<SourceRow & { observed_at: number }, [Store,string,string,number]>("SELECT s.*,rs.observed_at FROM sources s JOIN run_sources rs ON rs.source_id=s.id WHERE s.kind='listing' AND s.store=? AND s.app_id=? AND s.locale=? AND rs.observed_at>=? ORDER BY rs.observed_at DESC LIMIT 1").get(seed.store, seed.appId, `${seed.country}:${seed.language}`, now() - FRESHNESS.listingMs);
+      if (!cached) { if (state.lookups >= limit) return; state.lookups++; save(); }
       try {
-        const cached = db.query<SourceRow & { observed_at: number }, [Store,string,string,number]>("SELECT s.*,rs.observed_at FROM sources s JOIN run_sources rs ON rs.source_id=s.id WHERE s.kind='listing' AND s.store=? AND s.app_id=? AND s.locale=? AND rs.observed_at>=? ORDER BY rs.observed_at DESC LIMIT 1").get(seed.store, seed.appId, `${seed.country}:${seed.language}`, now() - FRESHNESS.listingMs);
         const listing = cached ? { ...decodeObject(cached.payload_json), request: { reusedSourceId: cached.id, observedAt: cached.observed_at }, capturedAt: cached.observed_at } as unknown as Listing : await stores[seed.store].details(seed.appId, seed, signal);
         const assessment = seed.included ? { relevance: "direct" as const, reason: "Explicitly included by you; listing content captured for review." } : relevance(listing, seed.intent, seed.origins.some(o => o.startsWith("chart:")) && !input.query);
         const candidate: CandidateRecord = { ...seed, ...assessment, developerId: listing.developerId, sourceId: "", title: listing.title };
@@ -135,7 +367,7 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     for (const seed of state.seeds.filter(s => s.included)) await lookup(seed);
     const ordered = metadataCandidates(state.seeds.map(seed => ({ ...seed, developerId: "unknown", relevance: "adjacent" as const, reason: "Awaiting captured listing content" })), settings.preset, broadLimit);
     for (const item of ordered) await lookup(state.seeds.find(s => candidateKey(s) === candidateKey(item))!, broadLimit);
-    for (const seed of (input.mode === "explore" ? [] : state.candidates.filter(c => c.relevance !== "unrelated").slice(0, LIMITS.relatedSeeds))) {
+    for (const seed of (broad ? [] : state.candidates.filter(c => c.relevance !== "unrelated").slice(0, LIMITS.relatedSeeds))) {
       const key = `related:${candidateKey(seed)}`; if (state.completed.includes(key)) continue;
       try {
         const related = await stores[seed.store].related(seed.appId, { country: seed.country, language: seed.language }, signal);
@@ -209,6 +441,7 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
           candidate.coreFunctionality = result.coreFunctionality;
           candidate.reason = result.reason;
           candidate.relevance = result.fit === "core" ? "direct" : "unrelated";
+          recordSummary(db, candidate.store, candidate.appId, result.coreFunctionality);
         }
       } catch (error) {
         if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
@@ -415,12 +648,68 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
   };
 
   const verification = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
-    const opportunities = provisional(db, task.run_id); if (!opportunities.length) return { checks: [], counterparts: [] };
     const run = getRun(db, task.run_id); const settings = researchSettings(decodeObject(run.settings_json)); const input = researchInputSchema.parse(decodeObject(run.input_json));
+    if (input.mode === "ideas") return checkIdeaMarkets(task, signal, run, input);
+    const opportunities = provisional(db, task.run_id);
+    if (!opportunities.length && !discoveryState(db, task.run_id).transfer) return { checks: [], counterparts: [] };
     const selected = discoveryState(db, run.id).selected; let checkpoint = decodeObject(task.checkpoint_json);
     const completed = (checkpoint.completed ?? []) as string[]; const websites = (checkpoint.websites ?? []) as unknown as Array<{ listing: string; official: boolean; result: WebResult }>;
     const counterpartResults = (checkpoint.counterparts ?? []) as unknown as CounterpartCheck[];
-    const save = (write?: () => void) => { checkpoint = json({ ...checkpoint, completed, websites, counterparts: counterpartResults }); checkpointTask(db, task.id, task.attempt_id!, checkpoint, write); };
+    const transferResults = (checkpoint.transfer ?? []) as unknown as TransferCheck[];
+    const save = (write?: () => void) => { checkpoint = json({ ...checkpoint, completed, websites, counterparts: counterpartResults, transfer: transferResults }); checkpointTask(db, task.id, task.attempt_id!, checkpoint, write); };
+    if (input.mode === "transfer") {
+      const target = planLocales("apple", [input.targetCountry!])[0];
+      const lookups = () => Number(checkpoint.transferLookups ?? 0);
+      for (const candidate of selected.filter(candidate => !candidate.removed)) {
+        const key = `transfer:${candidateKey(candidate)}`; if (completed.includes(key)) continue;
+        const listing = listingById(db, candidate.sourceId);
+        const check: TransferCheck = { source: candidateKey(candidate), targetCountry: target.country, availability: candidate.targetAvailability ?? "unknown", queries: [], sameListingFound: false, regionalVariants: [], alternatives: [], unscreened: [], sameProductSearch: true, needBasedSearch: !!candidate.targetSearchTerms?.length, state: "incomplete", conclusion: "" };
+        const details = new Map<string, TargetListing>(); const need: TargetListing[] = [];
+        const searches = [{ kind: "same_product", query: `${listing.title} ${listing.developer}`.trim() }, ...(candidate.targetSearchTerms ?? []).slice(0, LIMITS.transferSearchTerms).map(query => ({ kind: "need", query }))];
+        for (const search of searches) {
+          check.queries.push({ ...search, country: target.country, language: target.language });
+          const incomplete = (reason: string) => { if (search.kind === "same_product") check.sameProductSearch = false; else check.needBasedSearch = false; gap(db, run.id, `${key}:${search.kind}`, reason); };
+          try {
+            for (const result of (await stores[candidate.store].search(search.query, target, signal)).slice(0, LIMITS.transferResults)) {
+              const id = candidateKey(result);
+              if (id === candidateKey(candidate)) { check.sameListingFound = true; continue; }
+              if (!details.has(id)) {
+                if (lookups() >= settings.discoveryLimit) { incomplete("Lookup allowance ended before the target-market search was complete"); break; }
+                checkpoint.transferLookups = lookups() + 1; save();
+                const detail = await stores[candidate.store].details(result.appId, target, signal);
+                details.set(id, { id, store: detail.store, appId: detail.appId, title: detail.title, developer: detail.developer, developerId: detail.developerId, url: detail.url, category: detail.category, description: detail.description.slice(0, 1500), rating: detail.rating, ratingTotal: detail.ratingTotal });
+              }
+              const found = details.get(id)!;
+              const sameName = !!listing.title && found.title.trim().toLowerCase() === listing.title.trim().toLowerCase();
+              if (found.developerId === listing.developerId || sameName) { if (!check.regionalVariants.some(item => item.id === id)) check.regionalVariants.push(found); }
+              else if (search.kind === "need" && !need.some(item => item.id === id)) need.push(found);
+            }
+          } catch { signal.throwIfAborted(); incomplete("Target-market store search or listing details unavailable"); }
+        }
+        const pending = need.filter(item => !check.regionalVariants.some(variant => variant.id === item.id));
+        if (pending.length && aiOptions.configured !== false) try {
+          const scope = { mode: "topic", query: candidate.coreFunctionality ?? `${listing.title}. ${listing.description.slice(0, 300)}`, categories: [], urls: [], websiteUrls: [] };
+          const screened = await analyze(db, task, "screening", { scope, candidates: pending.map((item, index) => ({ index, title: item.title, category: item.category, description: item.description, store: item.store, discoveryOrigins: [] })) }, [], signal, aiOptions);
+          check.alternatives = screened.candidates.filter(result => result.fit === "core").map(result => pending[result.candidateIndex]);
+        } catch (error) {
+          if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error;
+          check.unscreened = pending; gap(db, run.id, `${key}:screening`, "Target-market alternatives could not be screened for the same job");
+        } else check.unscreened = pending;
+        const market = target.country;
+        [check.state, check.conclusion] = check.sameListingFound ? ["same_listing", `The same listing appeared in a ${market} store search; treat the availability result as unreliable`]
+          : check.regionalVariants.length ? ["regional_variant", `A listing with the same name or developer exists in ${market}; it may be a regional variant`]
+          : check.alternatives.length ? ["alternatives", `Local alternatives for the same job were found in ${market}`]
+          // Only a confirmed missing listing can become an open lead; a manually added app was never checked.
+          : check.availability !== "unavailable" ? ["unchecked", `Absence from the ${market} storefront was not confirmed for this app`]
+          : !check.sameProductSearch || !check.needBasedSearch ? ["incomplete", "Target-market search incomplete"]
+          : check.unscreened.length ? ["unscreened", "Possible alternatives found; not screened for the same job"]
+          : ["open", "No suitable alternative found in this research"];
+        // Listing text is only needed for screening; the checkpoint keeps the identifying facts.
+        for (const list of [check.regionalVariants, check.alternatives, check.unscreened]) list.forEach(item => { item.description = item.description.slice(0, 300); });
+        transferResults.push(check); completed.push(key); save();
+      }
+      if (!opportunities.length) return json({ checks: [], counterparts: [], transfer: transferResults });
+    }
     for (const candidate of selected) {
       const listing = listingById(db, candidate.sourceId); const key = `website:${candidateKey(candidate)}`;
       if (completed.includes(key)) continue;
@@ -485,8 +774,8 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     try {
       const checks = await analyze(db, task, "verification", { opportunities, counterparts: counterpartResults, sources: quotes.map(source => ({ ...source, text: source.text.slice(0, 8000) })) }, quotes, signal, aiOptions);
       const keys = new Set(opportunities.map(o => o.key));
-      return json({ checks: checks.checks.filter(check => keys.has(check.key)), counterparts: counterpartResults });
-    } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error; gap(db, run.id, "verification", "Competitor claims could not be validated"); return json({ checks: [], counterparts: counterpartResults }); }
+      return json({ checks: checks.checks.filter(check => keys.has(check.key)), counterparts: counterpartResults, transfer: transferResults });
+    } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error; gap(db, run.id, "verification", "Competitor claims could not be validated"); return json({ checks: [], counterparts: counterpartResults, transfer: transferResults }); }
   };
 
   const report = async (task: TaskRow, signal: AbortSignal): Promise<JsonObject> => {
@@ -500,7 +789,26 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     const discovery = discoveryState(db, run.id);
     const cohort = discovery.selected.filter(candidate => !candidate.removed);
     let marketOverview: JsonObject | null = null;
-    if (cohort.length && aiOptions.configured !== false) try {
+    const transferChecks = (Array.isArray(verificationData.transfer) ? verificationData.transfer : []) as unknown as TransferCheck[];
+    const order = ["open", "unscreened", "incomplete", "not_searched", "unchecked", "alternatives", "regional_variant", "same_listing"];
+    // Every transferable gap is listed; the target-market search ran only for the selected ones.
+    const removed = new Set(discovery.selected.filter(candidate => candidate.removed).map(candidateKey));
+    const surveyed = !discovery.transfer ? [] : transferLeadRows(db, run.id, LIMITS.transferLeads + removed.size).filter(row => !removed.has(`${row.store}:${row.app_id}`));
+    const surveyedKeys = new Set(surveyed.map(row => `${row.store}:${row.app_id}`));
+    const transferPool = !discovery.transfer ? [] : [
+      ...surveyed.map(row => ({ key: `${row.store}:${row.app_id}`, store: row.store, appId: row.app_id, sourceId: row.source_id, verdict: transferVerdict.safeParse(row.assessment_json ? decodeObject(row.assessment_json) : null).data, availability: "unavailable" as TargetAvailability, checkedAt: row.checked_at })),
+      // Apps added by hand during review were never checked against the target storefront.
+      ...cohort.filter(candidate => !surveyedKeys.has(candidateKey(candidate))).map(candidate => ({ key: candidateKey(candidate), store: candidate.store, appId: candidate.appId, sourceId: candidate.sourceId, verdict: undefined, availability: candidate.targetAvailability ?? "unknown" as TargetAvailability, checkedAt: candidate.targetCheckedAt ?? null })),
+    ];
+    const transferFound = !discovery.transfer ? 0 : db.query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM transfer_listings WHERE run_id=? AND fit IN ('transferable','unscreened')").get(run.id)!.n;
+    const transferLeads = transferPool.map(lead => {
+      const listing = listingById(db, lead.sourceId); const check = transferChecks.find(check => check.source === lead.key) ?? null;
+      return { key: lead.key, store: lead.store, appId: lead.appId, sourceId: lead.sourceId, title: listing.title, developer: listing.developer, url: listing.url, category: listing.category, rating: listing.rating, ratingTotal: listing.ratingTotal, released: listing.released ?? null,
+        coreFunctionality: lead.verdict?.coreFunctionality.slice(0, 300) ?? null, fit: lead.verdict?.fit ?? null, barriers: (lead.verdict?.barriers ?? []).slice(0, 3).map(item => item.slice(0, 300)), reason: (lead.verdict?.reason ?? "Not screened.").slice(0, 300), availability: lead.availability, availabilityCheckedAt: lead.checkedAt ?? null, state: check?.state ?? "not_searched", check };
+    }).sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state) || (b.ratingTotal ?? 0) - (a.ratingTotal ?? 0) || a.key.localeCompare(b.key)).slice(0, LIMITS.transferLeads);
+    if (transferFound > transferLeads.length) gap(db, run.id, "transfer_lead_limit", "More transfer leads were found than the report lists; the rest remain in the survey table");
+    // Transfer leads are unrelated products, so a single combined landscape would mislead.
+    if (cohort.length && !discovery.transfer && aiOptions.configured !== false) try {
       const listingRows = cohort.map(candidate => sourceById(db, candidate.sourceId));
       const candidates = cohort.map((candidate, index) => {
         const listing = listingById(db, candidate.sourceId);
@@ -515,11 +823,21 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     }
     const assembled = proposed.map(opportunity => assembleOpportunity(opportunity, selected, findings, checks, counterparts, rows, now(), analyzedIds));
     let synthesis: JsonObject = { summary: proposed.length ? "Opportunities assembled from validated evidence." : selected.length ? "No source-backed opportunities could be established. Try a more specific need or additional stores/languages." : "No trusted review evidence was available. Inspect app selection and identity/collection coverage before retrying.", recommendations: [], limitations: [] };
+    const markets = (Array.isArray(verificationData.markets) ? verificationData.markets : []) as unknown as IdeaMarket[];
+    const verdicts = ["none_reported", "equivalent_unconfirmed", "not_researched", "reported_present", "equivalent_confirmed"];
+    const ideaLeads = (discovery.ideas ?? []).map(idea => {
+      const urlOf = new Map(idea.pages.map(page => [page.sourceId, page.url]));
+      const profile = idea.profile ? { ...idea.profile, evidence: (idea.profile.evidence as JsonObject[]).map(item => ({ ...item, url: urlOf.get(String(item.sourceId)) ?? null })) } : null;
+      return { id: idea.id, name: idea.name, summary: idea.summary, officialUrl: idea.officialUrl, status: idea.status, pages: idea.pages, failures: idea.failures, profile, market: markets.find(market => market.id === idea.id) ?? null };
+    }).sort((a, b) => verdicts.indexOf(a.market?.verdict ?? "not_researched") - verdicts.indexOf(b.market?.verdict ?? "not_researched") || a.id.localeCompare(b.id, "en", { numeric: true }));
+    const runInput = decodeObject(run.input_json);
+    if (discovery.ideas) synthesis.summary = "Business ideas from your pasted research were read from their sources. Statements without a quoted source remain unverified claims.";
+    if (transferLeads.length && !proposed.length) synthesis.summary = "Apps not found in the target storefront are listed as transfer leads. No review-backed app concepts could be established from this sample.";
     if (task.kind === "no_matching_apps") synthesis.summary = "No matching apps were found. Adjust the need, selected stores or countries and try again.";
     if (assembled.length) try {
       synthesis = json(await analyze(db, task, "report", { opportunities: assembled, exploration: discovery.exploration ?? null, marketOverview, coverage: decodeObject(getRun(db, run.id).coverage_json), sources: quotes.filter(source => analyzedIds.has(source.id)) }, quotes, signal, aiOptions));
     } catch (error) { if (error instanceof AiPaused || signal.aborted || getRun(db, run.id).status !== "running") throw error; gap(db, run.id, "report_synthesis", "Report prose synthesis failed; validated evidence and code-computed assessment retained"); }
-    const summary = json({ ...synthesis, exploration: discovery.exploration ?? null, marketOverview, opportunities: assembled, counts: { collected: rows.filter(row => row.kind === "review").length, trustedUnique: new Set(rows.filter(row => row.kind === "review" && row.logical_review_key).map(row => row.logical_review_key)).size, selected: selected.length, analyzed: analyzedIds.size }, coverage: decodeObject(getRun(db, run.id).coverage_json), status: getRun(db, run.id).coverage === "gaps" ? "Completed with gaps" : "Completed", sampling: "Purposive sample; counts describe analyzed source reviews, not all users or distinct people.", noMatchingApps: task.kind === "no_matching_apps" });
+    const summary = json({ ...synthesis, exploration: discovery.exploration ?? null, ideas: discovery.ideas ? { sourceCountry: runInput.sourceCountry, targetCountry: runInput.targetCountry, researched: Array.isArray(runInput.targetFindings), leads: ideaLeads } : null, transfer: discovery.transfer ? { ...discovery.transfer, listed: transferLeads.length, found: Math.max(transferFound, transferLeads.length), leads: transferLeads } : null, marketOverview, opportunities: assembled, counts: { collected: rows.filter(row => row.kind === "review").length, trustedUnique: new Set(rows.filter(row => row.kind === "review" && row.logical_review_key).map(row => row.logical_review_key)).size, selected: selected.length, analyzed: analyzedIds.size }, coverage: decodeObject(getRun(db, run.id).coverage_json), status: getRun(db, run.id).coverage === "gaps" ? "Completed with gaps" : "Completed", sampling: "Purposive sample; counts describe analyzed source reviews, not all users or distinct people.", noMatchingApps: task.kind === "no_matching_apps" });
     checkpointTask(db, task.id, task.attempt_id!, { ready: true }, () => {
       for (const opportunity of assembled) db.query("INSERT INTO opportunities(id,run_id,report_key,title,priority,confidence,report_json,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,report_key) DO NOTHING").run(randomUUID(), run.id, opportunity.key, opportunity.title, opportunity.priority, opportunity.confidence, encodeJson(opportunity), now());
     });
@@ -530,7 +848,8 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
     if (stage === "collection") {
       const selected = discoveryState(db, run.id).selected.filter(c => !c.removed); const settings = researchSettings(decodeObject(run.settings_json));
       const quotas = equalShares(settings.reviewLimit, selected.length);
-      if (!selected.length || !settings.reviewLimit) return [{ key: "no_reviews", kind: "no_reviews", checkpoint: emptyCollection(now()) }];
+      // Transfer is a listing survey; it never collects reviews.
+      if (!selected.length || !settings.reviewLimit || decodeObject(run.input_json).mode === "transfer") return [{ key: "no_reviews", kind: "no_reviews", checkpoint: emptyCollection(now()) }];
       return selected.flatMap((candidate, index) => {
         const locales = planLocales(candidate.store, settings.countries, settings.languages as string[]); const streamQuotas = equalShares(quotas[index], locales.length);
         return locales.map((locale, streamIndex) => ({ key: `${candidateKey(candidate)}:${locale.country}:${locale.language}`, kind: "review_stream", checkpoint: json({ ...emptyCollection(now()), store: candidate.store, appId: candidate.appId, ...locale, appQuota: quotas[index], quota: streamQuotas[streamIndex], appIndex: index, streamIndex, scopeHash: hash({ store: candidate.store, appId: candidate.appId, ...locale, sort: "newest", policy: POLICY_VERSION, collector: COLLECTOR_VERSION }) }) }));
@@ -546,6 +865,11 @@ export function createResearchPipeline(db: DB, dependencies: ResearchDependencie
   return { handlers: { discovery: discover, collection: collect, analysis, grouping, verification, report }, planner };
 }
 
+interface TransferLeadRow { store: Store; app_id: string; category: string; chart: string; rank: number; checked_at: number | null; source_id: string; fit: string; assessment_json: string | null; payload_json: string }
+// Leads of a survey: missing from the target storefront and not tied to the source market, most-rated first.
+function transferLeadRows(db: DB, runId: string, limit: number): TransferLeadRow[] {
+  return db.query<TransferLeadRow, [string, number]>("SELECT t.store,t.app_id,t.category,t.chart,t.rank,t.checked_at,t.source_id,t.fit,t.assessment_json,s.payload_json FROM transfer_listings t JOIN sources s ON s.id=t.source_id WHERE t.run_id=? AND t.fit IN ('transferable','unscreened') ORDER BY t.fit='transferable' DESC, COALESCE(json_extract(s.payload_json,'$.ratingTotal'),0) DESC, t.rank, t.store, t.app_id LIMIT ?").all(runId, limit);
+}
 function emptyCollection(now: number): JsonObject { return { version: randomUUID(), scopeHash: "empty", startedAt: now, endedAt: null, quota: 0, uniqueCount: 0, pages: 0, requestAttempts: 0, noNewIdPages: 0, cursor: null, seenCursors: [], stopReason: null, complete: false }; }
 function fallbackOpportunities(themes: Array<{ title: string; need: string; sourceIds: string[]; audience: string | null; audienceInferred: boolean; uncertainty: string[] }>): ProposedOpportunity[] {
   return themes.map(theme => ({ key: `theme-${hash({ title: theme.title, sourceIds: theme.sourceIds })}`, title: theme.title, need: theme.need, audience: theme.audience, audienceInferred: theme.audienceInferred, perspective: "poor_execution", direction: null, sourceIds: theme.sourceIds, counterSourceIds: [], impact: "moderate", concept: theme.need, coreFeatures: [theme.need, "Validate the workflow with the represented audience"], differentiators: ["Execute the evidenced core workflow more reliably than the reviewed cohort"], executionPriorities: ["Resolve the source-backed need before expanding scope"], competitorPattern: theme.title, uncertainty: ["Preliminary concept assembled from source-backed themes after concept synthesis failed validation.", ...theme.uncertainty] }));
@@ -616,6 +940,14 @@ export interface CounterpartCheck {
   candidates: string[]; alternativeCandidates: string[]; unavailableMarkets: string[];
   sameProductSearch: boolean; needBasedSearch: boolean; verifiedSourceUrl: string | null; verifiedDestinationId: string | null; conclusion: string; feasibility: "Not verified";
   verifiedSource?: { sourceId: string; sourceKind: "website"; sourceUrl: string; provenance: "official_website" } | null;
+}
+export interface TargetListing { id: string; store: Store; appId: string; title: string; developer: string; developerId: string; url: string; category: string | null; description: string; rating: number | null; ratingTotal: number | null }
+export interface TransferCheck {
+  source: string; targetCountry: string; availability: TargetAvailability;
+  queries: { kind: string; query: string; country: string; language: string }[];
+  sameListingFound: boolean; regionalVariants: TargetListing[]; alternatives: TargetListing[]; unscreened: TargetListing[];
+  sameProductSearch: boolean; needBasedSearch: boolean;
+  state: "open" | "unscreened" | "incomplete" | "unchecked" | "alternatives" | "regional_variant" | "same_listing"; conclusion: string;
 }
 export function verifiedCounterpart(listing: Listing, pages: WebResult["pages"], candidateIds: string[]): { url: string; destinationId: string } | null {
   for (const page of pages) {

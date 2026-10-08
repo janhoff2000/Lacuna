@@ -41,7 +41,7 @@ import {
   fieldA11y,
   type ProgressView,
 } from "../components/workspace";
-import { CoverageDetails, ExploreLead, MarketOverview, ReportWorkspace } from "../components/report";
+import { BusinessIdeas, CoverageDetails, ExploreLead, MarketOverview, ReportWorkspace, TransferLeads } from "../components/report";
 import { startProgressPolling } from "../lib/progress";
 
 export const meta: MetaFunction = () => [{ title: "Research report · Lacuna" }];
@@ -117,7 +117,7 @@ export default function ResearchRun() {
     });
   }, [active, loaded.view.run.id, revalidator]);
   const { view } = loaded;
-  const appLimit = num(view.run.input.mode === "explore" ? view.run.settings.exploreAppLimit : view.run.settings.appLimit);
+  const appLimit = num(["explore", "transfer"].includes(str(view.run.input.mode)) ? view.run.settings.exploreAppLimit : view.run.settings.appLimit);
   const review =
     progress.status === "paused" && progress.reason === "app_review";
   const preliminary = view.tasks
@@ -183,6 +183,8 @@ export default function ResearchRun() {
         </details>
         <CoverageDetails view={view} />
         <ExploreLead report={view.report} />
+        <TransferLeads report={view.report} />
+        <BusinessIdeas report={view.report} />
         <MarketOverview report={view.report} />
         {review && (
           <section className="candidate-review">

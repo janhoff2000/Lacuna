@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const PROMPT_VERSION = "research-v9";
-export const SCHEMA_VERSION = "evidence-v9";
+export const PROMPT_VERSION = "research-v10";
+export const SCHEMA_VERSION = "evidence-v10";
 const text = z.string().max(3000);
 const translatedReviewText = z.string().max(12000);
 const languageTag = z.string().regex(/^[a-z]{2,3}(?:-[A-Z]{2})?$/);
@@ -25,6 +25,22 @@ const extractionFinding = findingSchema.omit({ sourceId: true, excerpt: true, tr
 export const themeSchema = z.object({ title: text, need: text, sourceIds: z.array(id).min(1).max(200), audience: text.nullable(), audienceInferred: z.boolean(), uncertainty: z.array(text).max(10) }).strict();
 const groupingTheme = themeSchema.omit({ sourceIds: true }).extend({ findingIndexes: z.array(z.number().int().min(0).max(999)).min(1).max(200) });
 const screeningCandidate = z.object({ candidateIndex: z.number().int().min(0).max(999), fit: z.enum(["core", "adjacent", "unrelated"]), coreFunctionality: text, reason: text }).strict();
+const transferCandidate = z.object({
+  candidateIndex: z.number().int().min(0).max(999), fit: z.enum(["transferable", "market_specific", "unclear"]),
+  coreFunctionality: text, targetSearchTerms: z.array(z.string().min(1).max(80)).min(1).max(3),
+  barriers: z.array(text).max(6), reason: text,
+}).strict();
+// A verdict as kept in the app catalog, without its position in one request.
+export const transferVerdict = transferCandidate.omit({ candidateIndex: true });
+export type TransferVerdict = z.infer<typeof transferVerdict>;
+const businessProfile = z.object({
+  whatItIs: text, customer: text.nullable(), howItWorks: z.array(text).min(1).max(8),
+  revenueModel: text.nullable(), pricing: text.nullable(), traction: text.nullable(),
+  sourceMarketDependence: z.enum(["none_evident", "possible", "strong"]), dependenceReason: text,
+  barriers: z.array(text).max(6),
+  evidence: z.array(citation.extend({ supports: z.enum(["what", "how", "revenue", "pricing", "traction"]) }).strict()).min(1).max(12),
+  uncertainty: z.array(text).max(10),
+}).strict();
 const exploration = z.object({
   title: text,
   problem: text,
@@ -48,6 +64,8 @@ export type ProposedOpportunity = z.infer<typeof opportunity>;
 export const schemas = {
   screening: z.object({ candidates: z.array(screeningCandidate).max(25) }).strict(),
   exploration,
+  business_profile: businessProfile,
+  transfer: z.object({ candidates: z.array(transferCandidate).max(25) }).strict(),
   market: z.object({
     coreProblem: text,
     sharedWorkflow: z.array(text).min(1).max(8),
@@ -65,6 +83,8 @@ export type AnalysisKind = keyof typeof schemas;
 const tasks: Record<AnalysisKind, string> = {
   screening: "Classify each supplied app listing by whether it belongs to the same functional competitor cohort as the research scope. Core means it primarily serves the same user job and product use case. Adjacent means it may serve the same audience but has a materially different core job. Unrelated means only generic words, a developer, franchise, genre, recommendation graph, or broad category connect it. A named product, game, sport, profession, or domain in the scope is a hard boundary unless the listing explicitly supports it. Return exactly one result for every candidateIndex and explain the concrete functional match or mismatch. Do not treat being returned by store search or related-app results as evidence of fit.",
   exploration: "Choose one narrow, coherent functional app micro-niche from the supplied cross-category listing sample. It must describe a specific audience, problem, and core workflow rather than a store category or vague trend. candidateIndexes must identify at least two listings that genuinely serve that same problem. Prefer a niche where listings show fragmented approaches, uneven capability coverage, or room for a more coherent product, but do not claim unmet demand from listings alone. whyPromising must distinguish observed evidence from hypotheses. searchTerms should be precise phrases suitable for follow-up store searches. Explicitly state that bounded chart and search samples cannot establish total market size, low saturation, revenue, demand, or that no competitor exists.",
+  transfer: "Each supplied app is listed in the sourceCountry store and its listing was not found in the targetCountry storefront. Classify whether the product concept could be offered in the target market. transferable means the user job plausibly exists in the target market and the product does not depend on an organisation or system that exists only in the source market. market_specific means the app is the client of a particular source-market bank, insurer, retailer, restaurant chain, carrier, utility, school, employer, health provider, government body, local media outlet, sports league or regional service, or otherwise only makes sense in the source market. unclear means the listing does not settle it. coreFunctionality states the user job in one sentence. targetSearchTerms are short store-search phrases written in targetLanguage that a local user would type to find an app for the same job; they are the only output not written in English. barriers lists plausible regulatory, licensing, data-protection, payment, content-rights, supply or localization reasons the product may be absent, each worded as a hypothesis to check rather than a fact. When focus is non-null, classify an app whose job lies outside that focus as unclear and say so in reason. Return exactly one result for every candidateIndex. A listing missing from one storefront is not evidence of demand, of an unserved need, or that no local alternative exists.",
+  business_profile: "Describe one business using only the supplied fetched pages; for this task those pages are the only evidence and may be cited whatever their provenance. name and pastedSummary are unverified claims from outside research: use them to know what to look for, never as facts. whatItIs says plainly what the business sells and to whom. howItWorks lists the steps a customer goes through, in order. customer, revenueModel, pricing and traction must be null unless a page states them; never estimate figures. Every non-null revenueModel, pricing or traction needs at least one evidence item with the matching supports value, and whatItIs needs one with supports what. Each evidence excerpt must be copied character for character from the page with that sourceId. sourceMarketDependence judges whether the business relies on an institution, law, infrastructure or supplier specific to sourceCountry, with dependenceReason explaining it. barriers lists plausible regulatory, licensing, data-protection, payment, supply or localization obstacles in targetCountry, each worded as a hypothesis to check. If the pages do not describe the business, say so in uncertainty rather than filling gaps.",
   market: "Summarize the supplied functional competitor cohort as one combined product landscape, never as an app-by-app catalogue. State the shared problem, the typical end-to-end user workflow, functionality common across multiple listings, and meaningful functionality available only in part of the cohort. Use listingIndexes to identify every listing that explicitly supports each capability. Do not call a capability common when only one listing supports it unless the cohort contains only one listing. Do not infer functionality from reviews, names, category membership, or absence of documentation. comparisonSummary should establish the current product baseline that proposed app concepts must improve upon, without claiming that undocumented functionality is absent.",
   extraction: "Detect the review language and return it as originalLanguage. Extract concrete needs and positive/negative product experiences from one written review. Each finding must use excerptIndex to select one code-provided passage; do not copy or paraphrase its text. Return no findings when evidence is irrelevant. When findings exist and originalLanguage is not covered by review.spokenLanguages, translate the complete review exactly once into review.translationLanguage and return that language code. Otherwise translation must be null. An audience not explicitly evidenced must be marked inferred.",
   grouping: "Group related supplied findings across languages and apps by the user job they affect. Each theme must use findingIndexes to select its supporting supplied findings; do not copy or invent source IDs. Preserve uncertainties. Never add evidence or audience certainty. One theme may contain several supporting reviews. Keep generic billing, paywall, login, crash, support, or performance complaints separate and low priority unless they directly prevent the cohort's defining workflow.",
@@ -101,6 +121,16 @@ export function validateStageLinks(kind: AnalysisKind, value: unknown, input: un
     const expected = new Set((context.candidates as Array<{ index: number }> ?? []).map(item => item.index));
     const candidates = schemas.screening.parse(value).candidates;
     if (candidates.length !== expected.size || new Set(candidates.map(item => item.candidateIndex)).size !== candidates.length || candidates.some(item => !expected.has(item.candidateIndex))) throw new Error("invalid_candidate_screening");
+  }
+  if (kind === "transfer") {
+    const expected = new Set((context.candidates as Array<{ index: number }> ?? []).map(item => item.index));
+    const candidates = schemas.transfer.parse(value).candidates;
+    if (candidates.length !== expected.size || new Set(candidates.map(item => item.candidateIndex)).size !== candidates.length || candidates.some(item => !expected.has(item.candidateIndex))) throw new Error("invalid_transfer_screening");
+  }
+  if (kind === "business_profile") {
+    const profile = schemas.business_profile.parse(value); const supported = new Set(profile.evidence.map(item => item.supports));
+    const claims = [["what", profile.whatItIs], ["revenue", profile.revenueModel], ["pricing", profile.pricing], ["traction", profile.traction]] as const;
+    if (claims.some(([supports, claim]) => claim !== null && !supported.has(supports))) throw new Error("unsupported_business_claim");
   }
   if (kind === "exploration") {
     const expected = new Set((context.candidates as Array<{ index: number }> ?? []).map(item => item.index));

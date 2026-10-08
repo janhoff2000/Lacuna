@@ -2811,6 +2811,67 @@ body::before {
 .explore-lead > .notice {
   margin-top: 18px;
 }
+.explore-facts.transfer-facts {
+  grid-template-columns: repeat(4, 1fr);
+}
+.prompt-box {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+.prompt-box > label {
+  width: 100%;
+}
+.prompt-box textarea {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.idea-evidence {
+  margin: 8px 0 0;
+  padding: 0 0 0 12px;
+  border-left: 2px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.idea-steps {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  line-height: 1.6;
+}
+.transfer-list {
+  display: grid;
+  gap: 6px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.transfer-list > li {
+  padding: 16px;
+  background: var(--content-surface);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.transfer-list p,
+.transfer-list details {
+  max-width: 86ch;
+  margin-top: 6px;
+  line-height: 1.6;
+}
+.transfer-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.transfer-heading .badge {
+  flex-shrink: 0;
+}
+.transfer-list summary {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
 .market-overview > .section-heading {
   align-items: flex-start;
 }
@@ -3350,7 +3411,8 @@ tbody tr > :last-child {
   .explore-lead {
     padding: 20px;
   }
-  .explore-facts {
+  .explore-facts,
+  .explore-facts.transfer-facts {
     grid-template-columns: 1fr 1fr;
   }
   .market-capability-columns {
