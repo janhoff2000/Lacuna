@@ -1164,6 +1164,9 @@ export function TransferLeads({ report }: { report?: JsonObject | null }) {
                       ? `${lead.ratingTotal.toLocaleString("en")} ${source} ratings`
                       : "",
                     str(lead.released) ? `Released ${date(str(lead.released))}` : "",
+                    lead.availability === "unavailable" && typeof lead.availabilityCheckedAt === "number"
+                      ? `Not found in ${target} on ${date(lead.availabilityCheckedAt)}`
+                      : "",
                   ]
                     .filter(Boolean)
                     .join(" · ")}

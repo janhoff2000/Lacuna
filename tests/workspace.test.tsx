@@ -352,10 +352,11 @@ describe("rendered workspace state contracts", () => {
   });
 
   test("transfer leads show the target-market check and its limits", () => {
-    const html = render(<TransferLeads report={{ transfer: { sourceCountry: "US", targetCountry: "DE", checked: 4, available: 1, unavailable: 2, marketSpecific: 1, leads: [{ key: "apple:111", store: "apple", title: "Pantry Pal", developer: "Pantry Inc", url: "https://apps.apple.com/us/app/id111", ratingTotal: 5000, coreFunctionality: "Pantry inventory and meal planning", reason: "Not tied to the US.", barriers: ["Recipe content may need localization."], check: { state: "open", conclusion: "No suitable alternative found in this research", queries: [{ kind: "need", query: "vorrat app" }], alternatives: [], regionalVariants: [], unscreened: [] } }] } }} />);
+    const html = render(<TransferLeads report={{ transfer: { sourceCountry: "US", targetCountry: "DE", checked: 4, available: 1, unavailable: 2, marketSpecific: 1, leads: [{ key: "apple:111", store: "apple", title: "Pantry Pal", developer: "Pantry Inc", url: "https://apps.apple.com/us/app/id111", ratingTotal: 5000, availability: "unavailable", availabilityCheckedAt: Date.UTC(2026, 8, 30, 12), coreFunctionality: "Pantry inventory and meal planning", reason: "Not tied to the US.", barriers: ["Recipe content may need localization."], check: { state: "open", conclusion: "No suitable alternative found in this research", queries: [{ kind: "need", query: "vorrat app" }], alternatives: [], regionalVariants: [], unscreened: [] } }] } }} />);
     expect(html).toContain("US apps not found in the DE storefront");
     expect(html).toContain("No local alternative found");
     expect(html).toContain("5,000 US ratings");
+    expect(html).toContain("Not found in DE on Sep 30, 2026");
     expect(html).toContain("vorrat app");
     expect(html).toContain("cannot show demand");
     expect(render(<TransferLeads report={{ exploration: null }} />)).toBe("");

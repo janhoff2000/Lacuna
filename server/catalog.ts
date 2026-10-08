@@ -28,10 +28,6 @@ export function catalogApp(db: DB, store: Store, appId: string): CatalogApp | nu
 export function recordAvailability(db: DB, store: Store, appId: string, country: string, status: KnownAvailability["status"], checkedAt: number): void {
   db.query("INSERT INTO app_availability(store,app_id,country,status,checked_at) VALUES(?,?,?,?,?) ON CONFLICT(store,app_id,country) DO UPDATE SET status=excluded.status,checked_at=excluded.checked_at WHERE excluded.checked_at>=app_availability.checked_at").run(store, appId, country, status, checkedAt);
 }
-export function knownAvailability(db: DB, store: Store, appId: string, country: string, now: number, freshness: Record<KnownAvailability["status"], number>): KnownAvailability | null {
-  const row = db.query<{ status: KnownAvailability["status"]; checked_at: number }, [Store, string, string]>("SELECT status,checked_at FROM app_availability WHERE store=? AND app_id=? AND country=?").get(store, appId, country);
-  return row && row.checked_at <= now && now - row.checked_at < freshness[row.status] ? { status: row.status, checkedAt: row.checked_at } : null;
-}
 
 export interface ScreeningKey { store: Store; appId: string; sourceCountry: string; targetCountry: string; inputHash: string }
 export function recordScreening(db: DB, key: ScreeningKey, result: JsonObject, screenedAt: number): void {

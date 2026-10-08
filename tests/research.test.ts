@@ -14,6 +14,7 @@ import { decodeObject, type Store } from "../shared/types";
 import { instructions, schemas, validateCitations, validateStageLinks, type ProposedOpportunity, type QuoteSource } from "../server/prompts";
 import { evidenceConfidence } from "../server/policy";
 import { reviewDisqualified } from "../server/sources";
+import { catalogApp } from "../server/catalog";
 import { searchIntents } from "../server/research-input";
 
 let directory: string; let db: DB;
@@ -322,6 +323,56 @@ describe("fixed research pipeline with fake adapters", () => {
     await drive(small, deps({ apple, aiConfigured: false }));
     expect(discoveryState(db, small).transfer).toMatchObject({ sampled: 4, checked: 4 });
     expect(() => createResearch(db, transferInput, { ...settings, surveyLimit: 25_001 })).toThrow();
+  });
+
+  test("a repeated survey reuses catalogued listings, storefront answers and screening verdicts", async () => {
+    const raw = (id: string, title: string) => ({ id, title, description: `${title} helps households.`, developerId: `dev${id}`, developer: `dev${id}` });
+    const listed = Array.from({ length: 4 }, (_, index) => raw(String(101 + index), `App ${index}`));
+    const batches: string[][] = []; let details = 0; let screenings = 0;
+    const apple: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => listed.map(item => normalizeListing("apple", item, locale, {})), search: async () => [],
+      details: async (id, locale) => { details++; return normalizeListing("apple", listed.find(item => item.id === id)!, locale, {}); },
+      availability: async ids => { batches.push(ids); return new Set(ids.filter(id => Number(id) % 2 === 0)); } };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_transfer") return fakeAi(request, signal);
+      screenings++; const data = JSON.parse(request.input as string).untrustedResearchData;
+      return { id: "transfer", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ candidates: data.candidates.map((candidate: { index: number }) => ({ candidateIndex: candidate.index, fit: "transferable", coreFunctionality: "Household organisation", targetSearchTerms: ["haushalt planer"], barriers: [], reason: "Not tied to the US." })) }) };
+    };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Lifestyle", apple: "6012", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    const start = Date.now(); const day = 86_400_000;
+    const survey = async (at: number) => { const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 5 }); await drive(runId, deps({ apple, aiTransport: transport, now: () => at })); return runId; };
+    await survey(start);
+    expect(batches).toEqual([["101", "102", "103", "104"]]); expect(screenings).toBe(1);
+    // Chart rows are catalogued for every sampled app; the screened ones also carry what the app does.
+    expect(db.query("SELECT app_id,summary FROM apps WHERE store='apple' AND app_id IN ('101','102','103','104') ORDER BY app_id").all()).toEqual([{ app_id: "101", summary: "Household organisation" }, { app_id: "102", summary: null }, { app_id: "103", summary: "Household organisation" }, { app_id: "104", summary: null }]);
+    expect(catalogApp(db, "apple", "101")).toMatchObject({ title: "App 0", description: "App 0 helps households.", detail: true });
+    expect(catalogApp(db, "apple", "102")).toMatchObject({ title: "App 1", detail: false, sourceId: null });
+
+    const sourceDetails = details;
+    const again = await survey(start + day);
+    expect(batches).toHaveLength(1); expect(screenings).toBe(1);
+    expect(discoveryState(db, again).transfer).toMatchObject({ checked: 4, available: 2, unavailable: 2, cached: 4 });
+    const leads = (readResearch(db, again).report!.transfer as { leads: Array<{ title: string; availabilityCheckedAt: number; fit: string }> }).leads;
+    expect(leads.map(lead => [lead.title, lead.availabilityCheckedAt, lead.fit])).toEqual([["App 0", start, "transferable"], ["App 2", start, "transferable"]]);
+    // The missing apps' own listing pages were reused: no new snapshot and no new details request.
+    expect(db.query("SELECT COUNT(*) AS n FROM sources WHERE kind='listing' AND store='apple' AND app_id IN ('101','103')").get()).toEqual({ n: 2 });
+    expect(details).toBe(sourceDetails);
+
+    // A "not found" answer expires first: after eight days only those apps are asked about again.
+    await survey(start + 8 * day);
+    expect(batches).toEqual([["101", "102", "103", "104"], ["101", "103"]]); expect(screenings).toBe(1);
+  });
+
+  test("the catalog migration backfills apps from listings captured before it existed", () => {
+    const file = join(directory, "catalog.sqlite"); const legacy = new Database(file);
+    for (const name of ["001_foundation", "002_research", "003_parallel_analysis", "004_parallel_ai_reservations", "005_spoken_languages"]) legacy.exec(readFileSync(new URL(`../server/migrations/${name}.sql`, import.meta.url), "utf8"));
+    const listing = (id: string, title: string, country: string, at: number) => legacy.query("INSERT INTO sources(id,kind,identity_key,store,app_id,locale,url,content_hash,payload_json,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, "listing", JSON.stringify(["apple", "111"]), "apple", "111", `${country}:en`, "https://apps.apple.com/us/app/id111", id, JSON.stringify({ title, description: `${title} description`, developer: "Pantry Inc", developerId: "apple:9", category: "Food", country, language: "en" }), at);
+    listing("old", "Pantry Pal", "US", 100); listing("new", "Pantry Pal 2", "GB", 200); listing("blank", "", "US", 300);
+    legacy.exec("PRAGMA user_version=5"); legacy.close();
+    const migrated = openDatabase(file);
+    expect(catalogApp(migrated, "apple", "111")).toEqual({ store: "apple", appId: "111", title: "Pantry Pal 2", description: "Pantry Pal 2 description", developer: "Pantry Inc", developerId: "apple:9", category: "Food", country: "GB", language: "en", detail: true, sourceId: "new", summary: null, firstSeenAt: 100, updatedAt: 200 });
+    expect(migrated.query("SELECT country,status,checked_at FROM app_availability ORDER BY country").all()).toEqual([{ country: "GB", status: "available", checked_at: 200 }, { country: "US", status: "available", checked_at: 300 }]);
+    migrated.close();
   });
 
   test("a large survey stays within a handful of store requests and outside the checkpoint", async () => {
