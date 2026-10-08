@@ -2,8 +2,8 @@ import type { Store } from "../shared/types";
 
 export const POLICY_VERSION = "selection-v3";
 export const PRESETS = {
-  quick: { apps: 30, exploreApps: 20, discoveryApps: 300, reviews: 2_000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 },
-  deep: { apps: 75, exploreApps: 40, discoveryApps: 750, reviews: 10_000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 },
+  quick: { apps: 30, exploreApps: 20, surveyListings: 2_000, discoveryApps: 300, reviews: 2_000, budgetUsd: 1, searchIntents: 6, metadataLookups: 100, reviewPageRequests: 100 },
+  deep: { apps: 75, exploreApps: 40, surveyListings: 10_000, discoveryApps: 750, reviews: 10_000, budgetUsd: 5, searchIntents: 12, metadataLookups: 300, reviewPageRequests: 400 },
 } as const;
 export const COUNTRY_PRESETS = {
   international: ["US", "GB", "DE", "FR", "NL", "ES"],
@@ -15,8 +15,11 @@ export const LIMITS = {
   poolMultiplier: 2, redistributionMultiplier: 2, developerShare: 0.25,
   recencyShare: 0.8, retryBaseMs: 1_000, retryMaxMs: 60_000,
   heartbeatMs: 5_000, heartbeatStaleMs: 20_000,
+  transferSearchTerms: 2, transferResults: 3, transferChartResults: 200, transferLeads: 300, transferBatch: 100, transferBatchFailures: 3, transferSingleFailures: 20,
 } as const;
-export const FRESHNESS = { listingMs: 86_400_000, collectionMs: 86_400_000, websiteMs: 604_800_000 } as const;
+export const FRESHNESS = { listingMs: 86_400_000, collectionMs: 86_400_000, websiteMs: 604_800_000,
+  // Catalog reuse in listing surveys. A stale "not found" would become a misleading lead, so it expires sooner.
+  catalogListingMs: 2_592_000_000, availableMs: 2_592_000_000, unavailableMs: 604_800_000 } as const;
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 function integer(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error("Expected nonnegative integer");

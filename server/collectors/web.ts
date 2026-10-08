@@ -111,7 +111,7 @@ export function extractPage(html: string, url: URL, capturedAt = Date.now()): We
   const boundedText = text.slice(0, WEB_LIMITS.textCharacters);
   return { url: url.href, text: boundedText, textTruncated: boundedText.length < text.length, links: [...new Set(links)].slice(0, 100), storeLinks: [...new Set(storeLinks)].slice(0, 100), capturedAt, contentHash: hash({ text: boundedText, storeLinks }) };
 }
-export async function collectWebsite(value: string, signal: AbortSignal, network: WebIO = io): Promise<WebResult> {
+export async function collectWebsite(value: string, signal: AbortSignal, network: WebIO = io, pages: number = WEB_LIMITS.pages): Promise<WebResult> {
   const result: WebResult = { pages: [], failures: [] };
   const failure = (url: string, reason: string) => result.failures.push({ url, reason, status: "Not verified" });
   try {
@@ -122,7 +122,7 @@ export async function collectWebsite(value: string, signal: AbortSignal, network
     if (robots.response.status !== 200 && robots.response.status !== 404 && robots.response.status !== 410) { failure(value, "robots_unavailable"); return result; }
     const rules = robots.response.status === 200 ? robots.response.body : "";
     const queue = [origin.href]; const visited = new Set<string>();
-    while (queue.length && visited.size < WEB_LIMITS.pages) {
+    while (queue.length && visited.size < pages) {
       signal.throwIfAborted(); const next = queue.shift()!; if (visited.has(next)) continue; visited.add(next);
       if (!robotsAllowed(rules, new URL(next).pathname)) { failure(next, "robots_disallowed"); continue; }
       try {
@@ -136,7 +136,8 @@ export async function collectWebsite(value: string, signal: AbortSignal, network
         queue.push(...relevant.filter(link => !visited.has(link) && !queue.includes(link)));
       } catch (error) { signal.throwIfAborted(); failure(next, safeWebError(error)); }
     }
-    if (queue.some(link => !visited.has(link))) failure(value, "five_page_limit");
+    // A deliberately narrower fetch is not a coverage gap.
+    if (pages >= WEB_LIMITS.pages && queue.some(link => !visited.has(link))) failure(value, "five_page_limit");
   } catch (error) { signal.throwIfAborted(); failure(value, safeWebError(error)); }
   return result;
 }

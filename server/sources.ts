@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { transaction, type DB } from "./db";
 import { decodeObject, encodeJson, type JsonObject, type Store } from "../shared/types";
 import { getTask } from "./runs";
+import { recordAvailability, recordListing } from "./catalog";
 
 export interface SourceSnapshot {
   kind: "listing" | "review" | "website"; store?: Store; appId?: string; reviewId?: string;
@@ -42,6 +43,13 @@ function saveSourceInTransaction(db: DB, runId: string, taskId: string, version:
   const hash = createHash("sha256").update(payload).digest("hex");
   db.query("INSERT INTO sources(id,kind,identity_key,store,app_id,review_id,locale,url,content_hash,payload_json,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,identity_key,content_hash,locale) DO NOTHING").run(randomUUID(), snapshot.kind, identity, snapshot.store ?? null, snapshot.appId ?? null, snapshot.reviewId ?? null, snapshot.locale, snapshot.url, hash, payload, snapshot.capturedAt);
   const source = db.query<{ id: string }, [string,string,string,string]>("SELECT id FROM sources WHERE kind=? AND identity_key=? AND content_hash=? AND locale=?").get(snapshot.kind, identity, hash, snapshot.locale)!;
+  if (snapshot.kind === "listing") {
+    // Every captured listing page feeds the cross-run app catalog in the same transaction.
+    const p = snapshot.payload; const text = (value: unknown) => typeof value === "string" ? value : "";
+    const country = text(p.country);
+    recordListing(db, { store: snapshot.store!, appId: snapshot.appId!, title: text(p.title), description: text(p.description), developer: text(p.developer), developerId: text(p.developerId), category: text(p.category) || null, country, language: text(p.language) }, snapshot.capturedAt, source.id);
+    if (/^[A-Z]{2}$/.test(country)) recordAvailability(db, snapshot.store!, snapshot.appId!, country, "available", snapshot.capturedAt);
+  }
   const counted = logicalKey && !db.query("SELECT id FROM run_sources WHERE run_id=? AND logical_review_key=? AND counted=1").get(runId, logicalKey) ? 1 : 0;
   db.query("INSERT INTO run_sources(id,run_id,source_id,task_id,collection_version,logical_review_key,selected,counted,provenance_json,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,source_id,task_id) DO NOTHING").run(randomUUID(), runId, source.id, taskId, version, logicalKey, selected && counted ? 1 : 0, counted, encodeJson(provenance), snapshot.capturedAt);
   if (selected && logicalKey) {

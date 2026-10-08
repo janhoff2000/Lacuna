@@ -106,6 +106,76 @@ replacement returns conflicting content for the same ID, Lacuna quarantines that
 ID from counts, analysis, and reuse for that run. Reports remain purposive samples,
 not representative market statistics.
 
+## Market transfer
+
+**Market transfer** looks for apps that are listed in one storefront (by default
+the United States) and not in another (by default Germany). It is a listing
+survey and collects no reviews. It reads the free, paid and grossing charts of
+each chosen category (up to 200 listings per chart and store), looks each app up
+by its store ID in the target storefront, and fetches source-market details only
+for listings that are missing there. The model then sets aside apps tied to a
+source-market institution (a specific bank, retailer, carrier, and so on). For
+the most-rated leads, up to the reviewed-app maximum, Lacuna searches the target
+store, in the target language, for a regional variant or a local alternative;
+the remaining leads are listed as not searched.
+
+**Market transfer listings** under Advanced sets how many apps are surveyed:
+2,000 for Quick, 10,000 for Deep, and up to 25,000. With every category selected
+the charts hold roughly 12,600 rows per store before duplicates, so the largest
+sizes need both stores. App Store checks and details are requested 100 apps at a
+time. Google Play has no such request, so every Play app costs one request, or
+two if it is missing; a large Play survey takes a long time and may be rate
+limited. After repeated failures Lacuna stops asking that store and reports the
+rest as unchecked.
+
+The survey is kept in its own table, not in the run checkpoint. Definitive
+storefront answers and screening verdicts are also remembered in the app catalog
+and reused by later surveys: "available" answers and listing pages for 30 days,
+"not found" answers for 7 days.
+
+Availability has three outcomes. Only an explicit "not found" answer from the
+store counts as missing; a timeout, rate limit, or any other failure is recorded
+as unknown and never becomes a lead. This rests on assumptions that the
+automated tests do not verify against the live stores:
+
+- An Apple lookup by ID that returns no result for a country means the app is
+  not listed in that storefront.
+- A Google Play listing page can be visible for a country where the app cannot
+  be installed, so Google Play gaps may be missed.
+- A local edition published under a different app ID, or a competitor that is
+  not a store app, is only found if the bounded target-market search surfaces it.
+
+A transfer lead is a prompt to investigate. It is not evidence of demand, market
+size, or regulatory feasibility in the target market.
+
+## Business ideas
+
+**Business ideas** covers businesses that are not store apps. Lacuna does not
+search the web itself. It writes a research prompt from the two markets and an
+optional focus; you run that prompt in a deep-research tool you already use
+(Claude, ChatGPT) and paste the complete answer back. The answer must end with
+the json block the prompt asks for. A second, optional prompt asks the same tool
+whether each idea, or a local equivalent, already exists in the target market.
+
+From the pasted answer Lacuna keeps only names and URLs as starting points. It
+fetches each listed page through the same public-address and robots.txt checks
+as other websites (two pages from a company's own site, one from any other
+source), and the model describes each business from those pages alone. Every
+description carries quotes that must appear literally on a fetched page; a
+profile that fails that check is discarded and the idea is shown with its pasted
+summary, labelled as an unverified claim. Reported local equivalents are fetched
+and screened the same way.
+
+Boundaries:
+
+- Which ideas exist, and what the target market contains, comes from research
+  outside Lacuna. "No local equivalent reported" means the pasted answer named
+  none, not that none exists.
+- Pasted URLs are fetched from your machine. Paste answers only from research
+  you ran yourself.
+- Reading the sources uses AI analysis and counts toward the run's AI ceiling.
+- Ideas are listed in the report and cannot yet be saved as opportunities.
+
 ## Back up and restore the SQLite database
 
 The default database is the ignored `data/lacuna.sqlite`. SQLite may keep recent

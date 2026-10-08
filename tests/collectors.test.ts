@@ -1,13 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import { appleAdapter } from "../server/collectors/apple";
 import { googleAdapter } from "../server/collectors/google";
-import { normalizeListing, normalizeReview, parseStoreUrl, planLocales } from "../server/collectors/common";
+import { listingMissing, normalizeListing, normalizeReview, parseStoreUrl, planLocales } from "../server/collectors/common";
 import { collectWebsite, extractPage, isPublicAddress, robotsAllowed, validatePublicUrl, WEB_LIMITS, type WebIO, type WebResponse } from "../server/collectors/web";
 import { verifiedCounterpart } from "../server/research";
 
 const locale = { country: "US", language: "en" };
 const signal = () => new AbortController().signal;
 describe("real adapter normalization and store scope", () => {
+  test("bulk Apple availability asks one storefront for many IDs and returns the listed ones", async () => {
+    const urls: string[] = [];
+    const apple = appleAdapter(undefined, async url => { urls.push(url); return { resultCount: 1, results: [{ trackId: 111, trackName: "Listed" }] }; });
+    expect([...await apple.availability!(["111", "222"], { country: "DE", language: "de" }, signal())]).toEqual(["111"]);
+    expect(urls).toEqual(["https://itunes.apple.com/lookup?id=111,222&country=de&entity=software"]);
+    await expect(apple.availability!(["111&country=us"], { country: "DE", language: "de" }, signal())).rejects.toThrow();
+    await expect(appleAdapter(undefined, async () => ({ error: "x" })).availability!(["111"], { country: "DE", language: "de" }, signal())).rejects.toThrow();
+  });
+
+  test("bulk Apple details map lookup rows to listings and ignore rows that were not asked for", async () => {
+    const row = (trackId: number, trackName: string) => ({ trackId, trackName, description: `${trackName} description`, artistId: 9, artistName: "Maker", sellerUrl: "https://maker.example", primaryGenreName: "Lifestyle", primaryGenreId: 6012, averageUserRating: 4.5, userRatingCount: 1200, price: 0, currency: "USD", releaseDate: "2026-01-05T08:00:00Z" });
+    const apple = appleAdapter(undefined, async () => ({ results: [row(111, "Listed"), row(999, "Uninvited"), { wrapperType: "artist" }] }));
+    const listings = await apple.detailsMany!(["111", "222"], { country: "US", language: "en" }, signal());
+    expect(listings).toHaveLength(1);
+    expect(listings[0]).toMatchObject({ store: "apple", appId: "111", title: "Listed", developerId: "apple:9", developer: "Maker", website: "https://maker.example/", category: "Lifestyle", ratingTotal: 1200, released: "2026-01-05T08:00:00.000Z", country: "US" });
+    await expect(apple.detailsMany!(Array.from({ length: 201 }, (_, index) => String(index + 1)), { country: "US", language: "en" }, signal())).rejects.toThrow();
+  });
+
+  test("only an explicit not-found counts as a listing missing from a storefront", () => {
+    expect(listingMissing(new Error("App not found (404)"))).toBe(true);
+    expect(listingMissing({ response: { statusCode: 404 } })).toBe(false);
+    expect(listingMissing(new Error("socket hang up"))).toBe(false);
+    expect(listingMissing(new Error("Error requesting Google Play:App not found (404)"))).toBe(false);
+  });
+
   test("exact store IDs survive URL parsing; ambiguous/non-store URLs rejected", () => {
     expect(parseStoreUrl("https://apps.apple.com/de/app/calm/id571800810?x=1")).toMatchObject({ store: "apple", appId: "571800810", country: "DE" });
     expect(parseStoreUrl("https://play.google.com/store/apps/details?id=com.calm.android&hl=de")).toMatchObject({ store: "google", appId: "com.calm.android" });
@@ -27,13 +52,13 @@ describe("real adapter normalization and store scope", () => {
   });
   test("installed wrappers issue bounded exact options and Apple page numbers are not response cursors", async () => {
     const calls: unknown[] = [];
-    const api = { category: { HEALTH: 6013 }, collection: { TOP_FREE_IOS: "topfreeapplications" }, sort: { RECENT: "mostrecent" }, search: async (options: unknown) => { calls.push(options); return Array.from({ length: 15 }, (_, i) => i + 1); }, app: async () => ({ id: 1 }), list: async () => [], similar: async () => [], reviews: async (options: unknown) => { calls.push(options); return [{ id: "x", score: 2, text: "Review" }]; } };
+    const api = { category: { HEALTH: 6013 }, collection: { TOP_FREE_IOS: "topfreeapplications", TOP_PAID_IOS: "toppaidapplications", TOP_GROSSING_IOS: "topgrossingapplications" }, sort: { RECENT: "mostrecent" }, search: async (options: unknown) => { calls.push(options); return Array.from({ length: 15 }, (_, i) => i + 1); }, app: async () => ({ id: 1 }), list: async () => [], similar: async () => [], reviews: async (options: unknown) => { calls.push(options); return [{ id: "x", score: 2, text: "Review" }]; } };
     const apple = appleAdapter(api);
     expect(await apple.search("sleep", locale, signal())).toHaveLength(10);
     expect(calls[0]).toMatchObject({ idsOnly: true, num: 10, country: "us" });
     expect(await apple.reviews("1", locale, null, signal())).toMatchObject({ nextCursor: "2", exhausted: false, reviews: [{ reviewId: "x", identityVerified: true, identityReason: "validated_scope" }] });
     await expect(apple.reviews("1", locale, "11", signal())).rejects.toThrow();
-    const google = googleAdapter({ ...api, category: { HEALTH: "HEALTH" }, collection: { TOP_FREE: "TOP_FREE" }, sort: { NEWEST: 2 }, reviews: async options => { calls.push(options); return { data: [{ id: "x", score: 3, text: "Review" }], nextPaginationToken: "next" }; } });
+    const google = googleAdapter({ ...api, category: { HEALTH: "HEALTH" }, collection: { TOP_FREE: "TOP_FREE", TOP_PAID: "TOP_PAID", GROSSING: "GROSSING" }, sort: { NEWEST: 2 }, reviews: async options => { calls.push(options); return { data: [{ id: "x", score: 3, text: "Review" }], nextPaginationToken: "next" }; } });
     expect(await google.reviews("com.sleep.app", locale, "previous", signal())).toMatchObject({ nextCursor: "next", exhausted: false, reviews: [{ reviewId: "x", identityVerified: true, identityReason: "validated_scope" }] });
     expect(calls.at(-1)).toMatchObject({ paginate: true, nextPaginationToken: "previous", num: 100, sort: 2 });
   });

@@ -25,6 +25,15 @@ export const CATEGORIES = [
   { label: "Medical", apple: "6020", google: "MEDICAL" },
   { label: "Music", apple: "6011", google: "MUSIC_AND_AUDIO" },
   { label: "Navigation", apple: "6010", google: "MAPS_AND_NAVIGATION" },
+  { label: "Entertainment", apple: "6016", google: "ENTERTAINMENT" },
+  { label: "Social", apple: "6005", google: "SOCIAL" },
+  { label: "Photo and video", apple: "6008", google: "PHOTOGRAPHY" },
+  { label: "Utilities", apple: "6002", google: "TOOLS" },
+  { label: "News", apple: "6009", google: "NEWS_AND_MAGAZINES" },
+  { label: "Sports", apple: "6004", google: "SPORTS" },
+  { label: "Weather", apple: "6001", google: "WEATHER" },
+  { label: "Books and reference", apple: "6018", google: "BOOKS_AND_REFERENCE" },
+  { label: "Games", apple: "6014", google: "GAME" },
 ] as const;
 export type FormValues = Record<string, string | string[]>;
 export type ActionResult = {
@@ -49,6 +58,12 @@ export const num = (value: Json | undefined): number =>
 export const title = (input: JsonObject): string =>
   str(input.query) ||
   (input.mode === "explore" ? "Explore app niches" : "") ||
+  (input.mode === "ideas"
+    ? `${str(input.sourceCountry)} business ideas for ${str(input.targetCountry)}`
+    : "") ||
+  (input.mode === "transfer"
+    ? `${str(input.sourceCountry)} apps not yet in ${str(input.targetCountry)}`
+    : "") ||
   objects(input.categories)
     .map((category) => str(category.label))
     .join(", ") ||

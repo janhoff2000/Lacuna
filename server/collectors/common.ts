@@ -11,6 +11,8 @@ export interface Listing extends Locale {
   ratingTotal: number | null; writtenReviewTotal: number | null;
   price: number | null; currency: string | null; rawFingerprint: string;
   request: JsonObject; capturedAt: number;
+  // First store release as reported by the listing; absent on snapshots captured before it was recorded.
+  released?: string | null;
 }
 export interface WrittenReview extends Locale {
   store: Store; appId: string; reviewId: string | null; title: string; text: string;
@@ -32,12 +34,24 @@ export function collectionFailure(error: unknown): CollectionFailure {
   if (status === 429) return new CollectionFailure("rate_limited");
   return new CollectionFailure("temporary");
 }
+// Both scrapers report a listing absent from the requested storefront with this
+// message: Apple for an empty lookup result, Google for an HTTP 404. Every other
+// failure (timeout, rate limit, parsing) says nothing about availability.
+export function listingMissing(error: unknown): boolean {
+  return error instanceof Error && /^App not found \(404\)$/.test(error.message);
+}
+export const CHART_COLLECTIONS = ["free", "paid", "grossing"] as const;
+export interface ChartOptions { collection?: (typeof CHART_COLLECTIONS)[number]; limit?: number }
 export interface StoreAdapter {
   search(term: string, locale: Locale, signal: AbortSignal): Promise<Listing[]>;
-  chart(category: string, locale: Locale, signal: AbortSignal): Promise<Listing[]>;
+  chart(category: string, locale: Locale, signal: AbortSignal, options?: ChartOptions): Promise<Listing[]>;
   details(appId: string, locale: Locale, signal: AbortSignal): Promise<Listing>;
   related(appId: string, locale: Locale, signal: AbortSignal): Promise<Listing[]>;
   reviews(appId: string, locale: Locale, cursor: string | null, signal: AbortSignal): Promise<ReviewPage>;
+  // Optional: which of these IDs are listed in one storefront, answered in a single request.
+  availability?(appIds: string[], locale: Locale, signal: AbortSignal): Promise<Set<string>>;
+  // Optional: full listings for many IDs in one request. IDs the store does not return are simply absent.
+  detailsMany?(appIds: string[], locale: Locale, signal: AbortSignal): Promise<Listing[]>;
 }
 export function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function record(value: unknown): Record<string, unknown> {
@@ -77,7 +91,11 @@ export function normalizeListing(store: Store, value: unknown, locale: Locale, r
     category: string(raw.genre) || null, categoryId: string(raw.genreId) || null, rating: number(raw.score),
     // Apple "reviews" is a rating count, not a count of written reviews.
     ratingTotal: number(store === "apple" ? raw.reviews : raw.ratings), writtenReviewTotal: store === "google" ? number(raw.reviews) : null,
-    price: number(raw.price), currency: string(raw.currency) || null, rawFingerprint: hash(raw), request, capturedAt: now };
+    price: number(raw.price), currency: string(raw.currency) || null, rawFingerprint: hash(raw), request, capturedAt: now, released: isoDate(raw.released) };
+}
+function isoDate(value: unknown): string | null {
+  const parsed = value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 export function normalizeReview(store: Store, appId: string, value: unknown, locale: Locale, request: JsonObject, trusted = false, now = Date.now()): WrittenReview {
   const raw = record(value); const id = string(raw.id).trim();

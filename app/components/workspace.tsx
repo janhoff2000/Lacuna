@@ -544,6 +544,8 @@ export type ProgressView = {
   stage: string;
   coverage: string;
   counts: { collected: number; selected: number; analyzed: number };
+  // Present only for a market-transfer survey, which counts listings instead of reviews.
+  survey?: { sampled: number; checked: number; missing: number; screened: number } | null;
   pipeline: {
     reviewCandidates: boolean;
     grouping: { processed: number; total: number };
@@ -646,18 +648,43 @@ export function ProgressPanel({
       </div>
       <PipelineTimeline progress={progress} />
       <dl className="metrics">
-        <div>
-          <dt>Reviews collected</dt>
-          <dd>{progress.counts.collected.toLocaleString("en")}</dd>
-        </div>
-        <div>
-          <dt>Selected for analysis</dt>
-          <dd>{progress.counts.selected.toLocaleString("en")}</dd>
-        </div>
-        <div>
-          <dt>Successfully analyzed</dt>
-          <dd>{progress.counts.analyzed.toLocaleString("en")}</dd>
-        </div>
+        {progress.survey ? (
+          <>
+            <div>
+              <dt>Listings checked</dt>
+              <dd>
+                {progress.survey.checked.toLocaleString("en")}{" "}
+                <span>of {progress.survey.sampled.toLocaleString("en")}</span>
+              </dd>
+            </div>
+            <div>
+              <dt>Missing in target store</dt>
+              <dd>{progress.survey.missing.toLocaleString("en")}</dd>
+            </div>
+            <div>
+              <dt>Missing apps screened</dt>
+              <dd>
+                {progress.survey.screened.toLocaleString("en")}{" "}
+                <span>of {progress.survey.missing.toLocaleString("en")}</span>
+              </dd>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <dt>Reviews collected</dt>
+              <dd>{progress.counts.collected.toLocaleString("en")}</dd>
+            </div>
+            <div>
+              <dt>Selected for analysis</dt>
+              <dd>{progress.counts.selected.toLocaleString("en")}</dd>
+            </div>
+            <div>
+              <dt>Successfully analyzed</dt>
+              <dd>{progress.counts.analyzed.toLocaleString("en")}</dd>
+            </div>
+          </>
+        )}
         <div>
           <dt>AI spend + reservations</dt>
           <dd>

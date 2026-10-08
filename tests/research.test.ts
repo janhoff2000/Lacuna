@@ -14,6 +14,7 @@ import { decodeObject, type Store } from "../shared/types";
 import { instructions, schemas, validateCitations, validateStageLinks, type ProposedOpportunity, type QuoteSource } from "../server/prompts";
 import { evidenceConfidence } from "../server/policy";
 import { reviewDisqualified } from "../server/sources";
+import { catalogApp } from "../server/catalog";
 import { searchIntents } from "../server/research-input";
 
 let directory: string; let db: DB;
@@ -81,6 +82,340 @@ describe("fixed research pipeline with fake adapters", () => {
     expect(state.requests?.some(request => request.key.startsWith("explore-search:"))).toBe(true);
     expect(state.selected).toHaveLength(2);
     expect(readResearch(db, runId).report?.exploration).toMatchObject({ title: "Offline sleep journals" });
+  });
+
+  test("market transfer keeps only source-market apps confirmed missing from the target storefront", async () => {
+    const raw = (id: string, title: string, description: string, developerId: string) => ({ id, title, description, developerId, developer: developerId, reviews: 5000, released: "2026-03-01T00:00:00Z" });
+    const catalog = [
+      raw("111", "Pantry Pal", "Track what is in your pantry and plan meals.", "pantry"),
+      raw("222", "First Ohio Bank", "Mobile banking for First Ohio Bank customers.", "ohio"),
+      raw("333", "Global Notes", "Notes that sync everywhere.", "global"),
+      raw("444", "Flaky Fitness", "Workout plans.", "flaky"),
+    ];
+    const german = raw("900", "Vorratsheld", "Vorräte verwalten und Mahlzeiten planen.", "vorrat");
+    const searches: Array<{ term: string; country: string }> = []; const charts: string[] = [];
+    const apple: StoreAdapter = { ...adapter("apple"),
+      chart: async (_category, locale, _signal, options) => { charts.push(`${options?.collection ?? "free"}:${options?.limit}`); return catalog.map(item => normalizeListing("apple", item, locale, {})); },
+      search: async (term, locale) => { searches.push({ term, country: locale.country }); return term === "vorrat app" ? [normalizeListing("apple", german, locale, {})] : []; },
+      details: async (id, locale) => {
+        if (locale.country === "DE" && ["111", "222"].includes(id)) throw new Error("App not found (404)");
+        if (locale.country === "DE" && id === "444") throw new Error("socket hang up");
+        return normalizeListing("apple", [...catalog, german].find(item => item.id === id)!, locale, {});
+      },
+    };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_transfer") return fakeAi(request, signal);
+      const data = JSON.parse(request.input as string).untrustedResearchData;
+      expect(data).toMatchObject({ sourceCountry: "US", targetCountry: "DE", targetLanguage: "de" });
+      return { id: "transfer", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ candidates: data.candidates.map((candidate: { index: number; title: string }) => candidate.title.includes("Bank")
+        ? { candidateIndex: candidate.index, fit: "market_specific", coreFunctionality: "Banking for one US bank", targetSearchTerms: ["banking"], barriers: [], reason: "Client of a US-only bank." }
+        : { candidateIndex: candidate.index, fit: "transferable", coreFunctionality: "Pantry inventory and meal planning", targetSearchTerms: ["vorrat app"], barriers: ["German-language recipe content may be required."], reason: "The household job is not tied to the US." }) }) };
+    };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Food and drink", apple: "6023", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], countries: ["US", "DE", "FR"], crossPlatform: true, exploreAppLimit: 5 });
+    expect(decodeObject(getRun(db, runId).settings_json)).toMatchObject({ countries: ["US"], crossPlatform: false });
+    expect((await drive(runId, deps({ apple, aiTransport: transport }))).status).toBe("completed");
+    const state = discoveryState(db, runId);
+    // Source-market details are fetched only for listings confirmed missing from the target storefront.
+    expect(db.query<{ app_id: string; availability: string; fit: string | null; details: number }, [string]>("SELECT app_id,availability,fit,source_id IS NOT NULL AS details FROM transfer_listings WHERE run_id=? ORDER BY app_id").all(runId)).toEqual([
+      { app_id: "111", availability: "unavailable", fit: "transferable", details: 1 }, { app_id: "222", availability: "unavailable", fit: "market_specific", details: 1 },
+      { app_id: "333", availability: "available", fit: null, details: 0 }, { app_id: "444", availability: "unknown", fit: null, details: 0 }]);
+    expect(state.selected.map(candidate => candidate.title)).toEqual(["Pantry Pal"]);
+    expect(state.transfer).toMatchObject({ checked: 4, available: 1, unavailable: 2, unknown: 1, transferable: 1, marketSpecific: 1 });
+    // A listing survey collects no reviews; target-market searches use the generated local terms.
+    expect(runTasks(db, runId).filter(task => task.kind === "review_stream")).toHaveLength(0);
+    expect(charts).toEqual(["free:200", "paid:200", "grossing:200"]);
+    expect(searches.filter(search => search.country === "DE").map(search => search.term)).toEqual(["Pantry Pal pantry", "vorrat app"]);
+    const report = readResearch(db, runId).report!; const transfer = report.transfer as { leads: Array<{ title: string; released: string; check: { state: string; alternatives: Array<{ title: string }> } }> };
+    expect(transfer.leads).toHaveLength(1);
+    expect(transfer.leads[0]).toMatchObject({ title: "Pantry Pal", released: "2026-03-01T00:00:00.000Z", availability: "unavailable", check: { state: "alternatives", alternatives: [{ title: "Vorratsheld" }] } });
+    expect(report.marketOverview).toBeNull();
+    expect(JSON.stringify(decodeObject(getRun(db, runId).coverage_json))).toContain("Target-market availability could not be established");
+  });
+
+  test("market transfer reports an open lead only for a confirmed gap with completed target searches", async () => {
+    const raw = (id: string, title: string, developerId: string) => ({ id, title, description: `${title} helps households.`, developerId, developer: developerId });
+    const catalog = [raw("111", "Pantry Pal", "pantry"), raw("222", "Chore Wheel", "chores"), raw("333", "Coupon Clip", "coupons")];
+    const targetOnly = [raw("901", "Chore Wheel DE", "chores")];
+    const apple: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => catalog.map(item => normalizeListing("apple", item, locale, {})),
+      // Chore Wheel has a sibling by the same developer; Coupon Clip itself turns up in the target search.
+      search: async (term, locale) => term.startsWith("Chore Wheel") ? [normalizeListing("apple", targetOnly[0], locale, {})] : term.startsWith("Coupon Clip") ? [normalizeListing("apple", catalog[2], locale, {})] : [],
+      details: async (id, locale) => { if (locale.country === "DE" && catalog.some(item => item.id === id)) throw new Error("App not found (404)"); return normalizeListing("apple", [...catalog, ...targetOnly].find(item => item.id === id)!, locale, {}); } };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      const data = JSON.parse(request.input as string).untrustedResearchData;
+      if (kind !== "lacuna_transfer") return fakeAi(request, signal);
+      return { id: "transfer", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ candidates: data.candidates.map((candidate: { index: number }) => ({ candidateIndex: candidate.index, fit: "transferable", coreFunctionality: "Household organisation", targetSearchTerms: ["haushalt planer"], barriers: [], reason: "Not tied to the US." })) }) };
+    };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Lifestyle", apple: "6012", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 5 });
+    await drive(runId, deps({ apple, aiTransport: transport }));
+    const leads = (readResearch(db, runId).report!.transfer as { leads: Array<{ title: string; check: { state: string; conclusion: string } }> }).leads;
+    expect(Object.fromEntries(leads.map(lead => [lead.title, lead.check.state]))).toEqual({ "Pantry Pal": "open", "Chore Wheel": "regional_variant", "Coupon Clip": "same_listing" });
+    expect(leads[0]).toMatchObject({ title: "Pantry Pal", check: { conclusion: "No suitable alternative found in this research" } });
+    expect(readResearch(db, runId).opportunities).toHaveLength(0);
+
+    // Every transferable gap is listed, but only the selected ones get a target-market search.
+    const narrow = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 1 });
+    await drive(narrow, deps({ apple, aiTransport: transport }));
+    const listed = readResearch(db, narrow).report!.transfer as { found: number; leads: Array<{ state: string }> };
+    expect(listed.found).toBe(3);
+    expect(listed.leads.map(lead => lead.state).filter(state => state === "not_searched")).toHaveLength(2);
+
+    // Without AI there are no local search terms, so the need-based search cannot count as complete.
+    // A different focus is a different screening question, so no earlier verdict is reused.
+    const offline = createResearch(db, { ...transferInput, query: "household tools" }, { ...settings, stores: ["apple"], reviewLimit: 0 });
+    await drive(offline, deps({ apple, aiConfigured: false }));
+    const states = (readResearch(db, offline).report!.transfer as { leads: Array<{ check: { state: string } }> }).leads.map(lead => lead.check.state);
+    expect(states).not.toContain("open"); expect(states).toContain("incomplete");
+    expect(() => createResearch(db, { ...transferInput, targetCountry: "US" }, settings)).toThrow();
+    expect(() => createResearch(db, { ...input, sourceCountry: "US", targetCountry: "DE" }, settings)).toThrow();
+  });
+
+  test("a manually added app whose target availability was never checked cannot become an open transfer lead", async () => {
+    const raw = (id: string, title: string, developerId: string) => ({ id, title, description: `${title} helps households.`, developerId, developer: developerId });
+    const catalog = [raw("111", "Pantry Pal", "pantry"), raw("444", "Added Later", "later")];
+    const apple: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => [normalizeListing("apple", catalog[0], locale, {})], search: async () => [],
+      details: async (id, locale) => { if (locale.country === "DE" && id === "111") throw new Error("App not found (404)"); return normalizeListing("apple", catalog.find(item => item.id === id)!, locale, {}); } };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Lifestyle", apple: "6012", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], reviewCandidates: true, reviewLimit: 0 });
+    const dependencies = deps({ apple, aiConfigured: false });
+    expect(await drive(runId, dependencies)).toMatchObject({ status: "paused", reason: "app_review" });
+    await addCandidate(db, runId, "https://apps.apple.com/us/app/id444", new AbortController().signal, { apple, google: adapter("google") });
+    resumeRun(db, runId, { reviewed: true });
+    await drive(runId, dependencies);
+    const leads = (readResearch(db, runId).report!.transfer as { leads: Array<{ title: string; check: { state: string } }> }).leads;
+    expect(leads.find(lead => lead.title === "Added Later")?.check.state).toBe("unchecked");
+  });
+
+  test("business ideas are described only from fetched pages and checked against pasted target-market findings", async () => {
+    const pages: Record<string, string> = {
+      "https://pantry.example/": "Pantry Club delivers refillable groceries on a monthly plan. Members pay $29 per month. Over 40,000 households subscribe.",
+      "https://news.example/pantry": "Pantry Club raised a Series A to expand its refill deliveries.",
+      "https://vorrat.example/": "Vorratsklub liefert nachfüllbare Lebensmittel im Abo an Haushalte in Deutschland.",
+      "https://bakery.example/": "A neighbourhood bakery with fresh bread every morning.",
+      "https://ghost.example/": "Ghost Kitchens Co rents shared kitchens to delivery-only restaurants.",
+    };
+    const fetched: Array<{ url: string; limit: number | undefined }> = [];
+    const website: ResearchDependencies["website"] = async (url, _signal, _network, limit) => {
+      fetched.push({ url, limit });
+      return pages[url] ? { pages: [{ url, text: pages[url], links: [], capturedAt: Date.now(), contentHash: url }], failures: [] } : { pages: [], failures: [{ url, status: "Not verified", reason: "http_404" }] };
+    };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      const data = JSON.parse(request.input as string).untrustedResearchData;
+      const reply = (output: unknown) => ({ id: kind, status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify(output) });
+      if (kind === "lacuna_screening") return reply({ candidates: data.candidates.map((candidate: { index: number; title: string }) => ({ candidateIndex: candidate.index, fit: candidate.title === "Vorratsklub" ? "core" : "unrelated", coreFunctionality: "x", reason: candidate.title === "Vorratsklub" ? "Same refill subscription." : "A bakery, not a refill service." })) });
+      if (kind !== "lacuna_business_profile") return fakeAi(request, signal);
+      const page = data.pages[0]; const invented = data.name === "Ghost Kitchens";
+      return reply({ whatItIs: `${data.name} described from its page.`, customer: null, howItWorks: ["Sign up", "Receive the service"], revenueModel: null, pricing: data.name === "Pantry Club" ? "$29 per month" : null, traction: null, sourceMarketDependence: "none_evident", dependenceReason: "Nothing on the pages ties it to the US.", barriers: ["Food labelling rules may differ."],
+        evidence: [{ sourceId: page.sourceId, excerpt: invented ? "Ghost Kitchens serves 900 cities." : page.text.slice(0, 30), supports: "what" }, ...(data.name === "Pantry Club" ? [{ sourceId: page.sourceId, excerpt: "$29 per month", supports: "pricing" }] : [])], uncertainty: [] });
+    };
+    const idea = (id: number, name: string, officialUrl: string | null, urls: string[] = []) => ({ id: `idea-${id}`, name, summary: `${name} pasted summary.`, officialUrl, urls });
+    const ideasInput = { mode: "ideas", query: "", urls: [], websiteUrls: [], categories: [], sourceCountry: "US", targetCountry: "DE",
+      ideas: [idea(1, "Pantry Club", "https://pantry.example/", ["https://news.example/pantry"]), idea(2, "Ghost Kitchens", "https://ghost.example/"), idea(3, "Unreachable", "https://gone.example/"), idea(4, "Quiet Idea", "https://bakery.example/"), idea(5, "Present Idea", "https://bakery.example/")],
+      targetFindings: [
+        { id: "idea-1", presence: "not_found", note: "One close equivalent.", urls: [], equivalents: [{ name: "Vorratsklub", url: "https://vorrat.example/", note: "" }] },
+        { id: "idea-2", presence: "not_found", note: "", urls: [], equivalents: [{ name: "Backstube", url: "https://bakery.example/", note: "" }, { name: "Offline GmbH", url: "https://gone.example/", note: "" }] },
+        { id: "idea-4", presence: "unknown", note: "Nothing comparable found.", urls: [], equivalents: [] },
+        { id: "idea-5", presence: "operates", note: "Launched in Berlin.", urls: [], equivalents: [] },
+      ] };
+    const runId = createResearch(db, ideasInput, { ...settings, reviewCandidates: true, crossPlatform: true });
+    expect(decodeObject(getRun(db, runId).settings_json)).toMatchObject({ countries: ["US"], reviewCandidates: false, crossPlatform: false });
+    expect((await drive(runId, deps({ website, aiTransport: transport }))).status).toBe("completed");
+    // The company's own site may be followed one page further; coverage and equivalents are single pages.
+    expect(fetched.find(item => item.url === "https://pantry.example/")?.limit).toBe(2);
+    expect(fetched.find(item => item.url === "https://news.example/pantry")?.limit).toBe(1);
+    expect(fetched.find(item => item.url === "https://vorrat.example/")?.limit).toBe(1);
+    const report = readResearch(db, runId).report!;
+    expect(report.noMatchingApps).toBe(false); expect(String(report.summary)).not.toContain("No matching apps");
+    const leads = (report.ideas as { leads: Array<{ name: string; status: string; profile: { pricing: string; evidence: Array<{ url: string }> } | null; market: { verdict: string; equivalents: Array<{ name: string; fit: string | null }> } | null }> }).leads;
+    const lead = (name: string) => leads.find(item => item.name === name)!;
+    expect(lead("Pantry Club")).toMatchObject({ status: "profiled", profile: { pricing: "$29 per month", evidence: [{ url: "https://pantry.example/" }, { url: "https://pantry.example/" }] }, market: { verdict: "equivalent_confirmed" } });
+    // An excerpt that is not on the fetched page invalidates the profile; the fetched page is still kept.
+    expect(lead("Ghost Kitchens")).toMatchObject({ status: "failed", profile: null, market: { verdict: "equivalent_unconfirmed", equivalents: [{ name: "Backstube", fit: "unrelated" }, { name: "Offline GmbH", fit: null }] } });
+    expect(sourcesForRun(db, runId, "website").some(source => source.url === "https://ghost.example/")).toBe(true);
+    expect(lead("Unreachable")).toMatchObject({ status: "no_sources", profile: null, market: { verdict: "not_researched" } });
+    expect(lead("Quiet Idea").market?.verdict).toBe("none_reported");
+    expect(lead("Present Idea").market?.verdict).toBe("reported_present");
+    expect(leads[0].name).toBe("Quiet Idea");
+    expect(JSON.stringify(decodeObject(getRun(db, runId).coverage_json))).toContain("A pasted source could not be read");
+    expect(runTasks(db, runId).filter(task => task.kind === "review_stream")).toHaveLength(0);
+    expect(() => createResearch(db, { ...ideasInput, ideas: undefined }, settings)).toThrow();
+    expect(() => createResearch(db, { ...input, ideas: ideasInput.ideas }, settings)).toThrow();
+  });
+
+  test("an idea whose profile was interrupted by a budget pause is profiled after resume", async () => {
+    const text = "Pantry Club delivers refillable groceries on a monthly plan to households.";
+    let fetches = 0;
+    const website: ResearchDependencies["website"] = async url => { fetches++; return { pages: [{ url, text, links: [], capturedAt: Date.now(), contentHash: url }], failures: [] }; };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_business_profile") return fakeAi(request, signal);
+      const page = JSON.parse(request.input as string).untrustedResearchData.pages[0];
+      return { id: kind, status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ whatItIs: "Refill grocery subscription.", customer: null, howItWorks: ["Subscribe"], revenueModel: null, pricing: null, traction: null, sourceMarketDependence: "none_evident", dependenceReason: "None stated.", barriers: [], evidence: [{ sourceId: page.sourceId, excerpt: page.text.slice(0, 20), supports: "what" }], uncertainty: [] }) };
+    };
+    const ideasInput = { mode: "ideas", query: "", urls: [], websiteUrls: [], categories: [], sourceCountry: "US", targetCountry: "DE", ideas: [{ id: "idea-1", name: "Pantry Club", summary: "Pasted.", officialUrl: "https://pantry.example/", urls: [] }] };
+    const runId = createResearch(db, ideasInput, settings, 0.0000001);
+    const dependencies = deps({ website, aiTransport: transport });
+    expect(await drive(runId, dependencies)).toMatchObject({ status: "paused", reason: "budget" });
+    expect(discoveryState(db, runId).ideas?.[0].status).toBe("fetched");
+    resumeRun(db, runId, { budgetUsd: 1 });
+    expect((await drive(runId, dependencies)).status).toBe("completed");
+    expect(discoveryState(db, runId).ideas?.[0].status).toBe("profiled");
+    expect(researchProgress(db, runId).survey).toBeNull();
+    // The pages fetched before the pause are reused rather than requested again.
+    expect(fetches).toBe(1);
+  });
+
+  test("a store that answers availability in bulk settles a whole chart in one request", async () => {
+    const raw = (id: string, title: string) => ({ id, title, description: `${title} helps households.`, developerId: `dev${id}`, developer: `dev${id}` });
+    const catalog = Array.from({ length: 6 }, (_, index) => raw(String(101 + index), `App ${index}`));
+    const batches: string[][] = []; let targetDetails = 0;
+    const apple: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => catalog.map(item => normalizeListing("apple", item, locale, {})), search: async () => [],
+      details: async (id, locale) => { if (locale.country === "DE") targetDetails++; return normalizeListing("apple", catalog.find(item => item.id === id)!, locale, {}); },
+      availability: async ids => { batches.push(ids); return new Set(ids.filter(id => Number(id) % 2 === 0)); } };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Lifestyle", apple: "6012", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    // A failed bulk request says nothing about any of its apps, and nothing about it is remembered.
+    const failing = createResearch(db, transferInput, { ...settings, stores: ["apple"] });
+    await drive(failing, deps({ apple: { ...apple, availability: async () => { throw new Error("App not found (404)"); } }, aiConfigured: false }));
+    expect(discoveryState(db, failing).transfer).toMatchObject({ sampled: 6, checked: 6, unavailable: 0, unknown: 6, cached: 0 });
+    expect(discoveryState(db, failing).candidates).toHaveLength(0);
+
+    const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 5 });
+    await drive(runId, deps({ apple, aiConfigured: false }));
+    expect(batches).toHaveLength(1); expect(batches[0]).toHaveLength(6); expect(targetDetails).toBe(0);
+    expect(discoveryState(db, runId).transfer).toMatchObject({ checked: 6, available: 3, unavailable: 3, unknown: 0, cached: 0 });
+
+    // Definitive answers are remembered: a later survey settles the same apps without asking the store again.
+    const again = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 5 });
+    await drive(again, deps({ apple, aiConfigured: false }));
+    expect(batches).toHaveLength(1);
+    expect(discoveryState(db, again).transfer).toMatchObject({ checked: 6, available: 3, unavailable: 3, cached: 6 });
+
+    // An empty bulk answer is treated as a failed request, not as a batch of missing apps, and is not remembered.
+    const empty = createResearch(db, { ...transferInput, targetCountry: "FR" }, { ...settings, stores: ["apple"] });
+    await drive(empty, deps({ apple: { ...apple, availability: async () => new Set<string>() }, aiConfigured: false }));
+    expect(discoveryState(db, empty).transfer).toMatchObject({ checked: 6, unavailable: 0, unknown: 6 });
+    expect(db.query("SELECT COUNT(*) AS n FROM app_availability WHERE country='FR'").get()).toEqual({ n: 0 });
+    expect(JSON.stringify(decodeObject(getRun(db, empty).coverage_json))).toContain("could not be established");
+
+    // Details for missing apps come in one bulk request when the store offers it.
+    let singles = 0; const detailBatches: string[][] = [];
+    const bulkDetails: StoreAdapter = { ...apple, details: async (id, locale) => { singles++; return apple.details(id, locale, new AbortController().signal); }, detailsMany: async (ids, locale) => { detailBatches.push(ids); return catalog.filter(item => ids.includes(item.id)).map(item => normalizeListing("apple", item, locale, {})); } };
+    const fresh = createResearch(db, { ...transferInput, sourceCountry: "GB" }, { ...settings, stores: ["apple"] });
+    await drive(fresh, deps({ apple: bulkDetails, aiConfigured: false }));
+    expect(detailBatches).toEqual([["101", "103", "105"]]); expect(singles).toBe(0);
+    expect(discoveryState(db, fresh).selected).toHaveLength(3);
+
+    // A store that keeps failing is abandoned instead of turning the whole sample into unknowns.
+    const big = Array.from({ length: 40 }, (_, index) => raw(String(501 + index), `Flaky ${index}`));
+    let attempts = 0;
+    const flaky: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => big.map(item => normalizeListing("apple", item, locale, {})), search: async () => [], details: async () => { attempts++; throw new Error("socket hang up"); } };
+    const stalled = createResearch(db, transferInput, { ...settings, stores: ["apple"] });
+    await drive(stalled, deps({ apple: flaky, aiConfigured: false }));
+    expect(attempts).toBe(20);
+    expect(discoveryState(db, stalled).transfer).toMatchObject({ sampled: 40, checked: 20, unknown: 20, unchecked: 20, unavailable: 0 });
+
+    // The survey size caps how many listings are sampled at all.
+    const small = createResearch(db, transferInput, { ...settings, stores: ["apple"], surveyLimit: 4 });
+    await drive(small, deps({ apple, aiConfigured: false }));
+    expect(discoveryState(db, small).transfer).toMatchObject({ sampled: 4, checked: 4 });
+    expect(() => createResearch(db, transferInput, { ...settings, surveyLimit: 25_001 })).toThrow();
+  });
+
+  test("a repeated survey reuses catalogued listings, storefront answers and screening verdicts", async () => {
+    const raw = (id: string, title: string) => ({ id, title, description: `${title} helps households.`, developerId: `dev${id}`, developer: `dev${id}` });
+    const listed = Array.from({ length: 4 }, (_, index) => raw(String(101 + index), `App ${index}`));
+    const batches: string[][] = []; let details = 0; let screenings = 0;
+    const apple: StoreAdapter = { ...adapter("apple"), chart: async (_category, locale) => listed.map(item => normalizeListing("apple", item, locale, {})), search: async () => [],
+      details: async (id, locale) => { details++; return normalizeListing("apple", listed.find(item => item.id === id)!, locale, {}); },
+      availability: async ids => { batches.push(ids); return new Set(ids.filter(id => Number(id) % 2 === 0)); } };
+    const transport: AiTransport = async (request, signal) => {
+      const kind = request.text?.format?.type === "json_schema" ? request.text.format.name : "";
+      if (kind !== "lacuna_transfer") return fakeAi(request, signal);
+      screenings++; const data = JSON.parse(request.input as string).untrustedResearchData;
+      return { id: "transfer", status: "completed", usage: { input_tokens: 200, output_tokens: 100 }, output_text: JSON.stringify({ candidates: data.candidates.map((candidate: { index: number }) => ({ candidateIndex: candidate.index, fit: "transferable", coreFunctionality: "Household organisation", targetSearchTerms: ["haushalt planer"], barriers: [], reason: "Not tied to the US." })) }) };
+    };
+    const transferInput = { mode: "transfer", query: "", urls: [], websiteUrls: [], categories: [{ label: "Lifestyle", apple: "6012", google: null }], sourceCountry: "US", targetCountry: "DE" };
+    const start = Date.now(); const day = 86_400_000;
+    const survey = async (at: number) => { const runId = createResearch(db, transferInput, { ...settings, stores: ["apple"], exploreAppLimit: 5 }); await drive(runId, deps({ apple, aiTransport: transport, now: () => at })); return runId; };
+    await survey(start);
+    expect(batches).toEqual([["101", "102", "103", "104"]]); expect(screenings).toBe(1);
+    // Chart rows are catalogued for every sampled app; the screened ones also carry what the app does.
+    expect(db.query("SELECT app_id,summary FROM apps WHERE store='apple' AND app_id IN ('101','102','103','104') ORDER BY app_id").all()).toEqual([{ app_id: "101", summary: "Household organisation" }, { app_id: "102", summary: null }, { app_id: "103", summary: "Household organisation" }, { app_id: "104", summary: null }]);
+    expect(catalogApp(db, "apple", "101")).toMatchObject({ title: "App 0", description: "App 0 helps households.", detail: true });
+    expect(catalogApp(db, "apple", "102")).toMatchObject({ title: "App 1", detail: false, sourceId: null });
+
+    const sourceDetails = details;
+    const again = await survey(start + day);
+    expect(batches).toHaveLength(1); expect(screenings).toBe(1);
+    expect(discoveryState(db, again).transfer).toMatchObject({ checked: 4, available: 2, unavailable: 2, cached: 4 });
+    const leads = (readResearch(db, again).report!.transfer as { leads: Array<{ title: string; availabilityCheckedAt: number; fit: string }> }).leads;
+    expect(leads.map(lead => [lead.title, lead.availabilityCheckedAt, lead.fit])).toEqual([["App 0", start, "transferable"], ["App 2", start, "transferable"]]);
+    // The missing apps' own listing pages were reused: no new snapshot and no new details request.
+    expect(db.query("SELECT COUNT(*) AS n FROM sources WHERE kind='listing' AND store='apple' AND app_id IN ('101','103')").get()).toEqual({ n: 2 });
+    expect(details).toBe(sourceDetails);
+
+    // A "not found" answer expires first: after eight days only those apps are asked about again.
+    await survey(start + 8 * day);
+    expect(batches).toEqual([["101", "102", "103", "104"], ["101", "103"]]); expect(screenings).toBe(1);
+  });
+
+  test("the catalog migration backfills apps from listings captured before it existed", () => {
+    const file = join(directory, "catalog.sqlite"); const legacy = new Database(file);
+    for (const name of ["001_foundation", "002_research", "003_parallel_analysis", "004_parallel_ai_reservations", "005_spoken_languages"]) legacy.exec(readFileSync(new URL(`../server/migrations/${name}.sql`, import.meta.url), "utf8"));
+    const listing = (id: string, title: string, country: string, at: number) => legacy.query("INSERT INTO sources(id,kind,identity_key,store,app_id,locale,url,content_hash,payload_json,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, "listing", JSON.stringify(["apple", "111"]), "apple", "111", `${country}:en`, "https://apps.apple.com/us/app/id111", id, JSON.stringify({ title, description: `${title} description`, developer: "Pantry Inc", developerId: "apple:9", category: "Food", country, language: "en" }), at);
+    listing("old", "Pantry Pal", "US", 100); listing("new", "Pantry Pal 2", "GB", 200); listing("blank", "", "US", 300);
+    legacy.exec("PRAGMA user_version=5"); legacy.close();
+    const migrated = openDatabase(file);
+    expect(catalogApp(migrated, "apple", "111")).toEqual({ store: "apple", appId: "111", title: "Pantry Pal 2", description: "Pantry Pal 2 description", developer: "Pantry Inc", developerId: "apple:9", category: "Food", country: "GB", language: "en", detail: true, sourceId: "new", summary: null, firstSeenAt: 100, updatedAt: 200 });
+    expect(migrated.query("SELECT country,status,checked_at FROM app_availability ORDER BY country").all()).toEqual([{ country: "GB", status: "available", checked_at: 200 }, { country: "US", status: "available", checked_at: 300 }]);
+    migrated.close();
+  });
+
+  test("a large survey stays within a handful of store requests and outside the checkpoint", async () => {
+    const categories = [{ label: "Lifestyle", apple: "6012", google: null }, { label: "Finance", apple: "6015", google: null }, { label: "Travel", apple: "6003", google: null }];
+    let requests = 0; let serial = 100_000; const titles = new Map<string, string>();
+    // Every chart returns 200 apps nobody has seen before; one in ten is missing from the target storefront.
+    const listing = (id: string, locale: { country: string; language: string }) => normalizeListing("apple", { id, title: titles.get(id) ?? `App ${id}`, description: "Helps households plan.", developerId: `dev${id}`, developer: `dev${id}`, reviews: Number(id) % 997 }, locale, {});
+    const apple: StoreAdapter = { ...adapter("apple"), search: async () => { requests++; return []; },
+      chart: async (_category, locale) => { requests++; return Array.from({ length: 200 }, () => listing(String(serial++), locale)); },
+      details: async () => { throw new Error("single lookups are not expected"); },
+      availability: async ids => { requests++; return new Set(ids.filter(id => Number(id) % 10 !== 0)); },
+      detailsMany: async (ids, locale) => { requests++; return ids.map(id => listing(id, locale)); } };
+    const runId = createResearch(db, { mode: "transfer", query: "", urls: [], websiteUrls: [], categories, sourceCountry: "US", targetCountry: "DE" }, { ...settings, stores: ["apple"], surveyLimit: 1_700, exploreAppLimit: 2 });
+    expect((await drive(runId, deps({ apple, aiConfigured: false }), 400)).status).toBe("completed");
+    const tally = discoveryState(db, runId).transfer as { unavailable: number };
+    // 1,800 chart rows are cut to the best-ranked 1,700; about one in ten is missing.
+    expect(tally).toMatchObject({ sampled: 1_700, checked: 1_700, available: 1_700 - tally.unavailable, unknown: 0 });
+    expect(tally.unavailable).toBeGreaterThan(160); expect(tally.unavailable).toBeLessThan(180);
+    // 9 charts, 17 availability batches, 2 detail batches, plus the target-market searches for two leads.
+    expect(requests).toBeLessThan(40);
+    const discovery = runTasks(db, runId).find(task => task.stage === "discovery")!;
+    expect(discovery.checkpoint_json.length).toBeLessThan(20_000);
+    const transfer = readResearch(db, runId).report!.transfer as { found: number; listed: number; leads: Array<{ ratingTotal: number; state: string }> };
+    expect(transfer).toMatchObject({ found: tally.unavailable, listed: tally.unavailable });
+    expect(researchProgress(db, runId).survey).toEqual({ sampled: 1_700, checked: 1_700, missing: tally.unavailable, screened: tally.unavailable });
+    // The two leads that got a target-market search are the most-rated ones.
+    const searched = transfer.leads.filter(lead => lead.state !== "not_searched");
+    expect(searched).toHaveLength(2);
+    expect(Math.min(...searched.map(lead => lead.ratingTotal))).toBeGreaterThanOrEqual(Math.max(...transfer.leads.filter(lead => lead.state === "not_searched").map(lead => lead.ratingTotal)));
+  });
+
+  test("a small survey still spans every chosen category and chart type", async () => {
+    const categories = ["6012", "6015", "6003", "6007", "6013", "6023"].map((apple, index) => ({ label: `Category ${index}`, apple, google: null }));
+    let serial = 1_000;
+    const apple: StoreAdapter = { ...adapter("apple"), search: async () => [],
+      chart: async (_category, locale) => Array.from({ length: 50 }, () => normalizeListing("apple", { id: String(serial++), title: "App", description: "Helps.", developerId: "dev" }, locale, {})),
+      availability: async ids => new Set(ids) };
+    const runId = createResearch(db, { mode: "transfer", query: "", urls: [], websiteUrls: [], categories, sourceCountry: "US", targetCountry: "DE" }, { ...settings, stores: ["apple"], surveyLimit: 36 });
+    await drive(runId, deps({ apple, aiConfigured: false }));
+    const spread = db.query<{ category: string; chart: string; n: number; worst: number }, [string]>("SELECT category,chart,COUNT(*) AS n,MAX(rank) AS worst FROM transfer_listings WHERE run_id=? GROUP BY category,chart").all(runId);
+    // 6 categories x 3 charts: the 36 places go to the top two apps of each chart.
+    expect(spread).toHaveLength(18);
+    expect(spread.every(row => row.n === 2 && row.worst === 1)).toBe(true);
   });
 
   test("functional cohort screening excludes related apps with a different core job", async () => {
@@ -305,11 +640,11 @@ describe("server mutation and migration boundaries", () => {
     expect(() => createResearch(db, { ...input, urls: ["http://localhost"] }, settings)).toThrow();
     expect(searchIntents({ ...input, mode: "topic", query: Array.from({ length: 20 }, (_, i) => `scope${i}`).join("; ") }, "quick")).toHaveLength(6);
   });
-  test("migration preserves old saved notes/status and records version five idempotently", () => {
+  test("migration preserves old saved notes/status and records the current version idempotently", () => {
     const file = join(directory, "legacy.sqlite"); const legacy = new Database(file);
     legacy.exec(readFileSync(new URL("../server/migrations/001_foundation.sql", import.meta.url), "utf8"));
     legacy.exec("PRAGMA user_version=1; INSERT INTO runs(id,input_json,settings_json,policy_version,status,stage,budget_usd,created_at,updated_at) VALUES('r','{}','{}','v1','completed','report',1,1,1); INSERT INTO opportunities(id,run_id,report_key,title,priority,confidence,report_json,created_at) VALUES('o','r','k','Title',1,'low','{}',1); INSERT INTO saved_opportunities(id,opportunity_id,status,notes,created_at,updated_at) VALUES('s','o','exploring','Keep me',1,1);"); legacy.close();
-    const migrated = openDatabase(file); expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 5 }); expect(migrated.query("SELECT status,notes FROM saved_opportunities").get()).toEqual({ status: "investigating", notes: "Keep me" }); expect(migrated.query("SELECT json_extract(settings_json, '$.spokenLanguages[0]') AS language FROM runs").get()).toEqual({ language: "en" }); expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([]); migrated.close();
+    const migrated = openDatabase(file); expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 7 }); expect(migrated.query("SELECT status,notes FROM saved_opportunities").get()).toEqual({ status: "investigating", notes: "Keep me" }); expect(migrated.query("SELECT json_extract(settings_json, '$.spokenLanguages[0]') AS language FROM runs").get()).toEqual({ language: "en" }); expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([]); migrated.close();
   });
 });
 

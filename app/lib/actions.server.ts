@@ -8,6 +8,7 @@ import {
 } from "../../server/operations";
 import { parseStoreUrl } from "../../server/collectors/common";
 import { LANGUAGE_TAG, normalizeLanguageTag } from "../../shared/types";
+import { IDEA_LIMITS, parseIdeas, parseMarket } from "../../shared/ideas";
 import {
   CATEGORIES,
   STATUS_LABELS,
@@ -15,6 +16,9 @@ import {
   type FormValues,
 } from "./workspace";
 
+const PASTE_FIELDS = ["ideasResearch", "targetResearch"];
+// Two pasted answers plus the ordinary fields, with room for multi-byte text.
+const MAX_BODY_BYTES = 393_216;
 const list = (value: string) =>
   value
     .split(/[\n,]+/)
@@ -33,8 +37,17 @@ export function parseFields(form: FormData): FormValues {
     });
   for (const key of new Set(form.keys())) {
     const entries = form.getAll(key);
+    if (PASTE_FIELDS.includes(key) && entries.some((item) => typeof item === "string" && item.length > IDEA_LIMITS.paste))
+      throw new FormError({
+        [key]: "This answer is too long to paste whole. Paste only its final json block.",
+      });
     if (
-      entries.some((item) => typeof item !== "string" || item.length > 20_000)
+      entries.some(
+        (item) =>
+          typeof item !== "string" ||
+          // Pasted deep-research answers are long; every other field stays small.
+          item.length > (PASTE_FIELDS.includes(key) ? IDEA_LIMITS.paste : 20_000),
+      )
     )
       throw new FormError({
         form: "A field is too long. Shorten it and try again.",
@@ -67,9 +80,36 @@ export function parseResearchForm(
   };
   const mode = field("mode");
   const preset = field("preset");
-  const countries = [...new Set(list(field("countries").toUpperCase()))];
+  const ideasMode = withInput && mode === "ideas";
+  const transfer = withInput && (mode === "transfer" || ideasMode);
+  const pastedIdeas = ideasMode ? parseIdeas(field("ideasResearch")) : null;
+  if (pastedIdeas && !pastedIdeas.ideas.length)
+    errors.ideasResearch = field("ideasResearch").trim()
+      ? pastedIdeas.errors[0]
+      : "Paste the research answer, including its final json block.";
+  const pastedMarket =
+    pastedIdeas?.ideas.length && field("targetResearch").trim()
+      ? parseMarket(field("targetResearch"), pastedIdeas.ideas)
+      : null;
+  if (pastedMarket && !pastedMarket.findings.length)
+    errors.targetResearch = pastedMarket.errors[0];
+  const sourceCountry = field("sourceCountry").toUpperCase();
+  const targetCountry = field("targetCountry").toUpperCase();
+  if (transfer && !/^[A-Z]{2}$/.test(sourceCountry))
+    errors.sourceCountry = "Choose the market where the apps already exist.";
   if (
-    !countries.length ||
+    transfer &&
+    (!/^[A-Z]{2}$/.test(targetCountry) || targetCountry === sourceCountry)
+  )
+    errors.targetCountry = "Choose a different market to check for gaps.";
+  // Transfer reads the source market only; the country picker is not shown.
+  const countries = transfer
+    ? [sourceCountry]
+    : [...new Set(list(field("countries").toUpperCase()))];
+  if (
+    transfer
+      ? false
+      : !countries.length ||
     countries.length > 30 ||
     countries.some((country) => !/^[A-Z]{2}$/.test(country))
   )
@@ -93,6 +133,8 @@ export function parseResearchForm(
   const exploreAppLimit = integer("exploreAppLimit", 100);
   const appLimit = integer("appLimit", 100);
   const reviewLimit = integer("reviewLimit", 20_000);
+  // Optional so forms saved before this setting existed keep working; blank means the depth default.
+  const surveyLimit = field("surveyLimit") ? integer("surveyLimit", 25_000) : undefined;
   const budgetUsd = Number(field("budgetUsd"));
   if (
     !field("budgetUsd") ||
@@ -115,7 +157,7 @@ export function parseResearchForm(
   const websiteUrls = list(field("websiteUrls"));
   const query = field("query").trim();
   if (withInput) {
-    if (!["topic", "category", "explore"].includes(mode))
+    if (!["topic", "category", "explore", "transfer", "ideas"].includes(mode))
       errors.mode = "Choose a research mode.";
     if (mode === "topic" && !query && !urls.length)
       errors.query = "Enter a topic, a need, or a store URL below.";
@@ -123,8 +165,9 @@ export function parseResearchForm(
       errors.query = "Keep the topic under 2,000 characters.";
     if (mode === "category" && !categories.length)
       errors.categories = "Choose at least one category.";
-    if (mode === "explore" && !categories.length)
+    if ((mode === "explore" || mode === "transfer") && !categories.length)
       categories = CATEGORIES.map((category) => ({ ...category }));
+    if (ideasMode) categories = [];
     if (urls.length > appLimit)
       errors.urls = "The included apps exceed your reviewed-app maximum.";
     for (const url of urls)
@@ -148,7 +191,16 @@ export function parseResearchForm(
   }
   if (Object.keys(errors).length) throw new FormError(errors);
   return {
-    input: { mode, query, categories, urls, websiteUrls },
+    input: {
+      mode,
+      query,
+      categories,
+      urls: transfer ? [] : urls,
+      websiteUrls: ideasMode ? [] : websiteUrls,
+      ...(transfer ? { sourceCountry, targetCountry } : {}),
+      ...(pastedIdeas ? { ideas: pastedIdeas.ideas } : {}),
+      ...(pastedMarket ? { targetFindings: pastedMarket.findings } : {}),
+    },
     settings: {
       ...defaults,
       preset,
@@ -159,6 +211,7 @@ export function parseResearchForm(
       exploreAppLimit,
       appLimit,
       reviewLimit,
+      ...(surveyLimit === undefined ? {} : { surveyLimit }),
       budgetUsd,
       reviewCandidates: field("reviewCandidates") === "on",
       crossPlatform: field("crossPlatform") === "on",
@@ -195,7 +248,7 @@ export async function workspaceAction(
   let db: DB | undefined;
   try {
     requireSameOrigin(request);
-    if (Number(request.headers.get("content-length") ?? 0) > 65_536)
+    if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES)
       throw new FormError({
         form: "This form is too large. Shorten the content and try again.",
       });
@@ -208,7 +261,7 @@ export async function workspaceAction(
           const { done, value } = await reader.read();
           if (done) break;
           bytes += value.byteLength;
-          if (bytes > 65_536) {
+          if (bytes > MAX_BODY_BYTES) {
             void reader.cancel();
             throw new FormError({
               form: "This form is too large. Shorten the content and try again.",
